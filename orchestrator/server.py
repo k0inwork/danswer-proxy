@@ -1,0 +1,403 @@
+"""
+Flask HTTP Server implementing the OpenAI-compatible completions and models endpoints.
+"""
+
+import json
+import re
+import signal
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
+
+from flask import Flask, Response, request, stream_with_context
+
+from orchestrator.client import DanswerClient
+from orchestrator.config import (
+    CACHE_FILE,
+    DANSWER_API_TOKEN,
+    DANSWER_URL,
+    FORCE_REFRESH_MATRIX,
+    LOG_MESSAGE_CONTENT,
+    MODELS,
+    PORT,
+    log_incoming_request,
+    logger,
+)
+from orchestrator.core import Orchestrator
+from orchestrator.matrix_manager import MatrixManager
+from orchestrator.models import session_registry
+from orchestrator.tool_parser import (
+    StreamingXmlToolParser,
+    clean_user_message,
+)
+from orchestrator.workspace_sync import WorkspaceProjectSync
+
+
+app = Flask(__name__)
+
+client: Optional[DanswerClient] = None
+orchestrator: Optional[Orchestrator] = None
+
+
+def make_completion_chunk(
+    completion_id: str,
+    content: Optional[str] = None,
+    role: Optional[str] = None,
+    finish_reason: Optional[str] = None,
+    tool_calls: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    delta: Dict[str, Any] = {}
+    if role is not None:
+        delta["role"] = role
+    if content is not None:
+        delta["content"] = content
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
+
+    return {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+
+
+@app.route("/v1/chat/completions", methods=["POST"])
+def chat_completions():
+    if orchestrator is None:
+        return {"error": "Orchestrator is not initialized"}, 503
+
+    data = request.get_json(silent=True) or {}
+    log_incoming_request(data)
+
+    messages = data.get("messages") or []
+    external_tools = data.get("tools") or []
+
+    if not messages or not isinstance(messages, list):
+        return {"error": "Valid messages list is required"}, 400
+
+    conversation_id = (
+        request.headers.get("X-Conversation-ID")
+        or data.get("conversation_id")
+        or "mvp-single-conversation"
+    )
+
+    stream_requested = data.get("stream", True)
+    completion_id = f"chatcmpl-{uuid4().hex}"
+
+    first_system_msg = next((m.get("content", "") for m in messages if isinstance(m, dict) and m.get("role") == "system"), "")
+    if isinstance(first_system_msg, str) and "Generate a concise, sentence-case title" in first_system_msg:
+        user_snippet = next((m.get("content", "") for m in messages if isinstance(m, dict) and m.get("role") == "user"), "")
+        if isinstance(user_snippet, str):
+            clean_snippet = clean_user_message(user_snippet).strip().replace("\n", " ")
+            clean_snippet = re.sub(r"[^a-zA-Z0-9\s]", "", clean_snippet)[:30].strip()
+            title_text = clean_snippet.capitalize() if clean_snippet else "General conversation"
+        else:
+            title_text = "General conversation"
+
+        title_json = json.dumps({"title": title_text})
+        logger.info("Fast-pathing title generation locally: %s", title_json)
+
+        if not stream_requested:
+            return Response(
+                json.dumps({
+                    "id": completion_id,
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": title_json},
+                        "finish_reason": "stop",
+                    }],
+                    "conversation_id": conversation_id,
+                }, ensure_ascii=False),
+                mimetype="application/json",
+            )
+        else:
+            def generate_title_stream():
+                chunk_msg = make_completion_chunk(
+                    completion_id=completion_id,
+                    role="assistant",
+                    content=title_json,
+                    finish_reason="stop",
+                )
+                yield f"data: {json.dumps(chunk_msg, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return Response(
+                generate_title_stream(),
+                mimetype="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+    if stream_requested is False:
+        try:
+            full_text = "".join(
+                orchestrator.process_query(
+                    conversation_id=conversation_id,
+                    messages=messages,
+                    external_tools=external_tools,
+                )
+            )
+            tool_invocation = DanswerClient.extract_local_tool_invocation(full_text)
+
+            if tool_invocation:
+                openai_tool_calls = [{
+                    "id": f"call_{uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_invocation["name"],
+                        "arguments": json.dumps(tool_invocation["arguments"], ensure_ascii=False),
+                    },
+                }]
+                clean_content = full_text.replace(tool_invocation["raw"], "").strip()
+                response_body = {
+                    "id": completion_id,
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": clean_content or None,
+                            "tool_calls": openai_tool_calls,
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                    "conversation_id": conversation_id,
+                }
+            else:
+                response_body = {
+                    "id": completion_id,
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": full_text},
+                        "finish_reason": "stop",
+                    }],
+                    "conversation_id": conversation_id,
+                }
+
+            return Response(
+                json.dumps(response_body, ensure_ascii=False),
+                mimetype="application/json",
+                headers={"X-Conversation-ID": conversation_id},
+            )
+        except Exception as exc:
+            logger.exception("Non-streaming request failed")
+            return {"error": str(exc), "conversation_id": conversation_id}, 500
+
+    @stream_with_context
+    def generate_sse():
+        first_chunk = True
+        try:
+            parser = StreamingXmlToolParser()
+            tool_calls_emitted = False
+
+            for chunk in orchestrator.process_query(
+                conversation_id=conversation_id,
+                messages=messages,
+                external_tools=external_tools,
+            ):
+                text_chunks, tool_calls = parser.feed(chunk)
+
+                for text in text_chunks:
+                    chunk_msg = make_completion_chunk(
+                        completion_id=completion_id,
+                        role="assistant" if first_chunk else None,
+                        content=text,
+                    )
+                    first_chunk = False
+                    yield f"data: {json.dumps(chunk_msg, ensure_ascii=False)}\n\n"
+
+                for tool_call in tool_calls:
+                    tool_calls_emitted = True
+                    chunk_msg = make_completion_chunk(
+                        completion_id=completion_id,
+                        role="assistant" if first_chunk else None,
+                        tool_calls=[tool_call],
+                    )
+                    first_chunk = False
+                    yield f"data: {json.dumps(chunk_msg, ensure_ascii=False)}\n\n"
+
+            for remaining_text in parser.flush():
+                chunk_msg = make_completion_chunk(
+                    completion_id=completion_id,
+                    role="assistant" if first_chunk else None,
+                    content=remaining_text,
+                )
+                first_chunk = False
+                yield f"data: {json.dumps(chunk_msg, ensure_ascii=False)}\n\n"
+
+            finish_reason = "tool_calls" if tool_calls_emitted or parser.in_tool_tag else "stop"
+            final_chunk = make_completion_chunk(completion_id=completion_id, finish_reason=finish_reason)
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        except Exception as exc:
+            logger.exception("Streaming request failed directly: %s", exc)
+            error_msg = f"\n\n[Danswer / Upstream Exception: {exc}]\n"
+            error_chunk = make_completion_chunk(
+                completion_id=completion_id,
+                role="assistant" if first_chunk else None,
+                content=error_msg,
+                finish_reason="stop",
+            )
+            yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return Response(
+        generate_sse(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Conversation-ID": conversation_id,
+            "Access-Control-Expose-Headers": "X-Conversation-ID",
+        },
+    )
+
+
+@app.route("/v1/models", methods=["GET"])
+def list_models():
+    model_entries = []
+
+    for model_key in MODELS.keys():
+        model_entries.append({
+            "id": model_key,
+            "object": "model",
+            "created": 1700000000,
+            "owned_by": "danswer-orchestrator",
+            "permission": [],
+            "root": model_key,
+            "parent": None,
+        })
+
+    common_aliases = [
+        "any",
+        "gpt-4",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-7-sonnet-20250219",
+        "claude-3-opus-20240229",
+    ]
+    for alias in common_aliases:
+        if alias not in MODELS:
+            model_entries.append({
+                "id": alias,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "danswer-orchestrator",
+                "permission": [],
+                "root": alias,
+                "parent": None,
+            })
+
+    return Response(
+        json.dumps({"object": "list", "data": model_entries}, ensure_ascii=False),
+        mimetype="application/json",
+    )
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return {
+        "status": "ok",
+        "version": "4.5.0",
+        "danswer_url": DANSWER_URL,
+        "orchestrator_initialized": (orchestrator is not None),
+        "active_tracked_sessions": session_registry.count(),
+    }
+
+
+def cleanup_active_sessions() -> None:
+    if client is None:
+        return
+    active_ids = session_registry.get_all()
+    logger.info("Starting shutdown cleanup for %d active tracked session(s)", len(active_ids))
+    for sid in active_ids:
+        try:
+            client.delete_chat_session(sid, kind="shutdown_cleanup")
+        except Exception as e:
+            logger.warning("Failed to delete session=%s during shutdown: %s", sid, e)
+    logger.info("ONYX SESSION CLEANUP remaining=%d", session_registry.count())
+
+
+def cleanup_stale_llmproxy_sessions(d_client: DanswerClient) -> None:
+    try:
+        logger.info("Scanning for old llmproxy sessions to erase...")
+        sessions = d_client.fetch_chat_sessions()
+        count = 0
+        for s in sessions:
+            desc = s.get("description") or s.get("chat_session_name") or ""
+            if desc.startswith("llmproxy:"):
+                sid = s.get("id") or s.get("chat_session_id")
+                if sid:
+                    try:
+                        d_client.delete_chat_session(str(sid), kind="stale_startup_cleanup")
+                        count += 1
+                        logger.info("Erased stale session id=%s desc=%s", sid, desc)
+                    except Exception as e:
+                        logger.warning("Failed to erase stale session id=%s: %s", sid, e)
+        logger.info("Cleaned up %d stale llmproxy sessions.", count)
+    except Exception as exc:
+        logger.warning("Could not complete automatic cleanup of llmproxy sessions: %s", exc)
+
+
+def handle_shutdown_signal(signum, frame):
+    logger.info("Received shutdown signal (%s). Performing cleanup...", signum)
+    cleanup_active_sessions()
+    sys.exit(0)
+
+
+def init_orchestrator(
+    danswer_url: str = DANSWER_URL,
+    danswer_token: Optional[str] = DANSWER_API_TOKEN,
+    workspace_root: Optional[str] = None,
+) -> Tuple[DanswerClient, Orchestrator]:
+    global client, orchestrator
+
+    if not danswer_token:
+        print("DANSWER_API_TOKEN environment variable is required", file=sys.stderr)
+        sys.exit(1)
+
+    import os
+    root_path = workspace_root or os.getcwd()
+
+    logger.info("Connecting to Onyx URL: %s", danswer_url)
+    client = DanswerClient(danswer_url=danswer_url, api_token=danswer_token)
+
+    cleanup_stale_llmproxy_sessions(client)
+
+    matrix_manager = MatrixManager(client=client, cache_file=CACHE_FILE)
+    routing_manifest, tool_ids = matrix_manager.get_or_build_matrix(
+        force_refresh=FORCE_REFRESH_MATRIX
+    )
+
+    workspace_sync = WorkspaceProjectSync(workspace_root=root_path, client=client)
+    workspace_sync.initialize_project()
+
+    orchestrator = Orchestrator(
+        client=client,
+        routing_manifest=routing_manifest,
+        tool_ids=tool_ids,
+        workspace_sync=workspace_sync,
+    )
+
+    logger.info("Loaded %s global tool IDs", len(tool_ids))
+    return client, orchestrator
+
+
+def run_server(port: int = PORT) -> None:
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+
+    init_orchestrator()
+
+    logger.info("API endpoint: http://0.0.0.0:%s/v1/chat/completions", port)
+
+    try:
+        app.run(host="0.0.0.0", port=port, threaded=True)
+    finally:
+        cleanup_active_sessions()
