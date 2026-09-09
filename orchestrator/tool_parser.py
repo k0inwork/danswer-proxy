@@ -272,7 +272,8 @@ def extract_last_tool_execution_context(
                     f"[TOOL RESULT ({tool_id})]: File '{file_path}' uploaded and staged (Status: {desc.status.value if desc else 'FAILED'}).\nContent output:\n{content}"
                 )
             elif workspace_sync and (fn_name in {"bash", "list_dir", "ls", "dir", "run_bash"}):
-                desc = workspace_sync.on_folder_read(os.getcwd(), content)
+                folder_target = getattr(workspace_sync, "root", None) or os.getcwd()
+                desc = workspace_sync.on_folder_read(folder_target, content)
 
                 tool_blocks.insert(
                     0,

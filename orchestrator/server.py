@@ -389,11 +389,11 @@ def init_orchestrator(
     return client, orchestrator
 
 
-def run_server(port: int = PORT) -> None:
+def run_server(port: int = PORT, workspace_root: Optional[str] = None) -> None:
     signal.signal(signal.SIGINT, handle_shutdown_signal)
     signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
-    init_orchestrator()
+    init_orchestrator(workspace_root=workspace_root)
 
     logger.info("API endpoint: http://0.0.0.0:%s/v1/chat/completions", port)
 

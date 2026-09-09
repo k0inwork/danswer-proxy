@@ -68,8 +68,32 @@ def __setattr__(name, value):
         globals()[name] = value
 
 
+import argparse
+import os
+
+
 def main() -> None:
-    run_server(PORT)
+    parser = argparse.ArgumentParser(
+        description="Onyx / Danswer Orchestrator application server with folder workspace monitoring."
+    )
+    parser.add_argument(
+        "-f",
+        "--folder",
+        type=str,
+        default=None,
+        help="Top directory to monitor, inspect files, and perform writes (default: current working directory)",
+    )
+    parser.add_argument(
+        "-p",
+        "--port",
+        type=int,
+        default=PORT,
+        help=f"Port for the HTTP server (default: {PORT})",
+    )
+    args = parser.parse_args()
+
+    folder_path = os.path.abspath(args.folder) if args.folder else os.getcwd()
+    run_server(port=args.port, workspace_root=folder_path)
 
 
 if __name__ == "__main__":
