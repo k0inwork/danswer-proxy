@@ -9,12 +9,12 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
-from orchestrator.config import logger
+from orchestrator.config import get_run_logger, logger
 from orchestrator.models import Descriptor, DescriptorStatus
 
 
 class WorkspaceProjectSync:
-    IGNORE_DIRS = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.cache', 'dist', 'build', '.idea', '.vscode'}
+    IGNORE_DIRS = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.cache', 'dist', 'build', '.idea', '.vscode', 'log', 'logs'}
     IGNORE_EXTS = ('.pyc', '.pyo', '.pyd', '.so', '.dll', '.dylib', '.tar', '.gz', '.zip', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf', '.log', '.tmp')
     IGNORE_FILES = {'persona_matrix_cache.json', 'workspace_sync_cache.json'}
 
@@ -55,6 +55,14 @@ class WorkspaceProjectSync:
             desc.status = DescriptorStatus.UPLOADED
             logger.info("CALLBACK [UPLOADED]: '%s' assigned ID=%s", canonical, file_id)
 
+        get_run_logger().log_file_upload(
+            file_path=desc.file_path,
+            canonical_name=canonical,
+            file_id=file_id,
+            project_id=desc.project_id,
+            status="UPLOADED",
+        )
+
         # Trigger second stage immediately upon upload completion
         if desc.project_id:
             try:
@@ -72,6 +80,14 @@ class WorkspaceProjectSync:
             logger.info("CALLBACK [READY]: '%s' successfully attached to project_id=%s", canonical, desc.project_id)
             self.save_cache()
 
+        get_run_logger().log_file_upload(
+            file_path=desc.file_path,
+            canonical_name=canonical,
+            file_id=desc.file_id,
+            project_id=desc.project_id,
+            status="READY",
+        )
+
     def _on_sync_failure(self, canonical: str, stage: str, error: Exception) -> None:
         """Callback Error Handler."""
         with self._lock:
@@ -80,6 +96,13 @@ class WorkspaceProjectSync:
                 desc.status = DescriptorStatus.FAILED
                 desc.error_message = f"{stage} failed: {error}"
             logger.error("CALLBACK [FAILED]: '%s' at stage '%s': %s", canonical, stage, error)
+
+        get_run_logger().log_file_upload(
+            file_path=desc.file_path if desc else "",
+            canonical_name=canonical,
+            status="FAILED",
+            error=f"{stage} failed: {error}",
+        )
 
     # ------------------------------------------------------------------------
     # Async Task Pipeline
@@ -237,6 +260,11 @@ class WorkspaceProjectSync:
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         with open(target_path, "w", encoding="utf-8") as f:
             f.write(content)
+        get_run_logger().log_action(
+            category="DISK_WRITE",
+            action="WRITE_WORKSPACE_FILE",
+            details={"file_path": target_path, "bytes": len(content.encode("utf-8"))},
+        )
         return self.on_tool_read(target_path, content)
 
     def execute_local_non_read_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
@@ -345,8 +373,114 @@ class WorkspaceProjectSync:
             except Exception as err:
                 return f"Error writing file '{req_path}': {err}"
 
-        # 5. Default fallback for other tools
-        return f"Tool '{tool_name}' executed with arguments: {json.dumps(args, ensure_ascii=False)}"
+        res_output = ""
+        # Execute tool logic above
+        if t_name in {"list_dir", "ls", "dir"}:
+            req_path = args.get("path") or args.get("directory") or args.get("dir_path") or "."
+            target_dir = os.path.join(self.root, req_path) if not os.path.isabs(req_path) else req_path
+            if os.path.exists(target_dir) and os.path.isdir(target_dir):
+                try:
+                    entries = sorted(os.listdir(target_dir))
+                    formatted_entries = []
+                    for e in entries:
+                        full_e = os.path.join(target_dir, e)
+                        suffix = "/" if os.path.isdir(full_e) else ""
+                        formatted_entries.append(f"{e}{suffix}")
+                    res_output = f"Directory listing of '{req_path}':\n" + "\n".join(formatted_entries[:100])
+                except Exception as err:
+                    res_output = f"Error listing directory '{req_path}': {err}"
+            else:
+                res_output = f"Directory not found: '{req_path}'"
+
+        elif t_name in {"grep_search", "grep", "search_code"}:
+            query = args.get("query") or args.get("pattern") or args.get("regex") or ""
+            search_path = args.get("path") or "."
+            target_dir = os.path.join(self.root, search_path) if not os.path.isabs(search_path) else search_path
+            matches = []
+            if os.path.exists(target_dir):
+                for root_dir, _, files in os.walk(target_dir):
+                    for file in files:
+                        if file.startswith(".") or file.endswith((".pyc", ".png", ".jpg", ".cache")):
+                            continue
+                        fpath = os.path.join(root_dir, file)
+                        try:
+                            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                                for line_no, line in enumerate(f, 1):
+                                    if query and query in line:
+                                        rel = os.path.relpath(fpath, self.root)
+                                        matches.append(f"{rel}:{line_no}: {line.strip()}")
+                                        if len(matches) >= 30:
+                                            break
+                        except Exception:
+                            continue
+                        if len(matches) >= 30:
+                            break
+                    if len(matches) >= 30:
+                        break
+            if matches:
+                res_output = f"Found {len(matches)} matches for '{query}':\n" + "\n".join(matches)
+            else:
+                res_output = f"No matches found for '{query}' in path '{search_path}'."
+
+        elif t_name in {"find_files", "glob", "find"}:
+            search_pattern = args.get("pattern") or args.get("query") or "*"
+            search_path = args.get("path") or "."
+            target_dir = os.path.join(self.root, search_path) if not os.path.isabs(search_path) else search_path
+            matches = []
+            if os.path.exists(target_dir):
+                for root_dir, _, files in os.walk(target_dir):
+                    for file in files:
+                        if file.startswith("."):
+                            continue
+                        rel_f = os.path.relpath(os.path.join(root_dir, file), self.root)
+                        if search_pattern == "*" or search_pattern.lower() in file.lower():
+                            matches.append(rel_f)
+                            if len(matches) >= 50:
+                                break
+                    if len(matches) >= 50:
+                        break
+            if matches:
+                res_output = f"Found {len(matches)} matching files for '{search_pattern}':\n" + "\n".join(matches)
+            else:
+                res_output = f"No files matching '{search_pattern}' found in path '{search_path}'."
+
+        elif t_name in {"write_file", "write", "create_file", "edit_file", "modify_file", "save_file", "replace_in_file"}:
+            req_path = args.get("file_path") or args.get("path") or args.get("filename") or args.get("target_file")
+            if not req_path:
+                res_output = "Error: File path argument missing for write operation."
+            else:
+                content = args.get("content") or args.get("text") or args.get("file_content") or args.get("code") or ""
+                old_str = args.get("old_str") or args.get("search") or args.get("find")
+                new_str = args.get("new_str") or args.get("replace")
+                if old_str is not None and new_str is not None:
+                    target_path = os.path.join(self.root, req_path) if not os.path.isabs(req_path) else req_path
+                    if os.path.exists(target_path):
+                        try:
+                            with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
+                                existing_content = f.read()
+                            if old_str in existing_content:
+                                content = existing_content.replace(old_str, new_str)
+                            else:
+                                res_output = f"String '{old_str}' not found in file '{req_path}'."
+                        except Exception as err:
+                            res_output = f"Error reading file '{req_path}' for replacement: {err}"
+
+                if not res_output:
+                    try:
+                        desc = self.write_workspace_file(req_path, content)
+                        res_output = f"Successfully wrote {len(content.encode('utf-8'))} bytes to file '{req_path}' in workspace."
+                    except Exception as err:
+                        res_output = f"Error writing file '{req_path}': {err}"
+        else:
+            res_output = f"Tool '{tool_name}' executed with arguments: {json.dumps(args, ensure_ascii=False)}"
+
+        get_run_logger().log_tool_call(
+            tool_name=tool_name,
+            arguments=args,
+            result_summary=res_output,
+            intercepted=False,
+        )
+        return res_output
 
     # ------------------------------------------------------------------------
     # Descriptor Accessors & Utilities
@@ -555,6 +689,12 @@ class WorkspaceProjectSync:
         full_payload = (header + tree_text).encode('utf-8')
 
         self.file_hashes[canonical] = tree_hash
+        get_run_logger().log_file_read(
+            file_path=self.root,
+            canonical_name=canonical,
+            size_bytes=len(full_payload),
+            source="update_top_folder",
+        )
         return self.dispatch_file_sync(canonical, self.root, full_payload)
 
     def on_tool_read(self, file_path: str, content: str) -> Optional[Descriptor]:
@@ -580,6 +720,14 @@ class WorkspaceProjectSync:
         self.revisions[canonical] = rev
         self.watched_files[canonical] = abs_path
 
+        get_run_logger().log_file_read(
+            file_path=abs_path,
+            canonical_name=canonical,
+            size_bytes=len(content_bytes),
+            revision=rev,
+            source="on_tool_read",
+        )
+
         return self.dispatch_file_sync(canonical, abs_path, full_payload)
 
     def on_folder_read(self, folder_path: str, listing_text: str) -> Optional[Descriptor]:
@@ -595,6 +743,12 @@ class WorkspaceProjectSync:
         full_payload = (header + listing_text).encode('utf-8')
 
         self.file_hashes[canonical] = content_hash
+        get_run_logger().log_file_read(
+            file_path=abs_path,
+            canonical_name=canonical,
+            size_bytes=len(full_payload),
+            source="on_folder_read",
+        )
         return self.dispatch_file_sync(canonical, abs_path, full_payload)
 
     def check_and_refresh_watched_files(self) -> None:

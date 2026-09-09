@@ -20,6 +20,8 @@ from orchestrator.config import (
     LOG_MESSAGE_CONTENT,
     MODELS,
     PORT,
+    get_run_logger,
+    init_run_logger,
     log_incoming_request,
     logger,
 )
@@ -96,6 +98,11 @@ def chat_completions():
 
         title_json = json.dumps({"title": title_text})
         logger.info("Fast-pathing title generation locally: %s", title_json)
+        get_run_logger().log_action(
+            category="FAST_PATH",
+            action="TITLE_GENERATE",
+            details={"title": title_text, "conversation_id": conversation_id},
+        )
 
         if not stream_requested:
             return Response(
@@ -364,6 +371,7 @@ def init_orchestrator(
 
     import os
     root_path = workspace_root or os.getcwd()
+    init_run_logger(workspace_root=root_path)
 
     logger.info("Connecting to Onyx URL: %s", danswer_url)
     client = DanswerClient(danswer_url=danswer_url, api_token=danswer_token)

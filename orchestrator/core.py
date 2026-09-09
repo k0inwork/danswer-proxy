@@ -12,6 +12,7 @@ from orchestrator.config import (
     PRIMARY_PERSONA_ID,
     REAL_TALK_MODEL,
     ROUTING_MODEL,
+    get_run_logger,
     logger,
 )
 from orchestrator.models import DescriptorStatus, Segment
@@ -158,7 +159,15 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         if persona_id not in PERSONAS:
             return "CONTINUE", current_persona_id, "invalid target persona"
 
-        return decision, persona_id if decision == "SWITCH" else current_persona_id, reason
+        target_p_id = persona_id if decision == "SWITCH" else current_persona_id
+        get_run_logger().log_llm_response(
+            model=ROUTING_MODEL,
+            session_id=detector_session,
+            response_summary=f"decision={decision} target={target_p_id} reason={reason}",
+            extra={"decision": decision, "target_persona": target_p_id, "reason": reason},
+        )
+
+        return decision, target_p_id, reason
 
     def compact_segment(self, segment: Segment) -> str:
         prompt = (
@@ -173,6 +182,13 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
             model=REAL_TALK_MODEL,
             disable_search=True,
         ).strip()
+
+        get_run_logger().log_llm_response(
+            model=REAL_TALK_MODEL,
+            session_id=segment.session_id,
+            response_summary=result,
+            extra={"action": "COMPACT_SEGMENT", "persona_id": segment.persona_id},
+        )
 
         return result
 
@@ -235,6 +251,16 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         if persona_switched:
             new_persona_name = PERSONAS.get(target_persona, f"Persona {target_persona}")
             system_notice = f"*[Switched persona from {old_persona_name} to {new_persona_name}]*\n\n"
+            get_run_logger().log_action(
+                category="PERSONA",
+                action="SWITCH",
+                details={
+                    "conversation_id": conversation_id,
+                    "from_persona": old_persona_name,
+                    "to_persona": new_persona_name,
+                    "reason": reason,
+                },
+            )
             yield system_notice
 
         tool_context = extract_last_tool_execution_context(messages, workspace_sync=self.workspace_sync)
@@ -307,6 +333,12 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                             if has_read_tool:
                                 intercepted_batch = True
                                 logger.info("[AUTO-GROUNDING INTERCEPT] Intercepted batch of %d tool call(s) containing read/grounding tool.", len(all_tools))
+                                get_run_logger().log_tool_call(
+                                    tool_name="[AUTO_GROUNDING_BATCH]",
+                                    arguments={"tool_count": len(all_tools)},
+                                    result_summary="Intercepted read tools for blocking workspace sync",
+                                    intercepted=True,
+                                )
 
                                 attached_headers: List[str] = []
                                 tool_result_entries: List[str] = []
@@ -362,4 +394,11 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
             logger.error("Streaming message invocation failed: %s", exc)
             raise RuntimeError(f"Onyx invocation error: {exc}") from exc
 
-        self.sessions.append_message(conversation_id=conversation_id, role="assistant", content="".join(chunks))
+        final_answer = "".join(chunks)
+        self.sessions.append_message(conversation_id=conversation_id, role="assistant", content=final_answer)
+        get_run_logger().log_llm_response(
+            model=REAL_TALK_MODEL,
+            session_id=active.session_id,
+            response_summary=final_answer,
+            extra={"conversation_id": conversation_id},
+        )
