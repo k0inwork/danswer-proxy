@@ -373,7 +373,12 @@ class WorkspaceProjectSync:
             logger.warning("Failed to save workspace sync cache: %s", e)
 
     def sanitize_path(self, path: str) -> str:
-        rel = os.path.relpath(path, self.root) if path.startswith(self.root) else path
+        abs_p = os.path.abspath(os.path.join(self.root, path)) if not os.path.isabs(path) else os.path.abspath(path)
+        if abs_p == self.root:
+            folder_name = os.path.basename(self.root) or "root"
+            clean = folder_name.replace("/", "_").replace("\\", "_").replace(".", "_").strip("_")
+            return clean or "root"
+        rel = os.path.relpath(abs_p, self.root) if abs_p.startswith(self.root) else abs_p
         clean = rel.replace("/", "_").replace("\\", "_").replace(".", "_").strip("_")
         return clean or "root"
 
@@ -538,7 +543,7 @@ class WorkspaceProjectSync:
         canonical = f"TOP_FOLDER_{self.sanitize_path(self.root)}.txt"
 
         desc = self.descriptors.get(canonical)
-        if self.file_hashes.get(canonical) == tree_hash and desc and desc.status in {DescriptorStatus.UPLOADED, DescriptorStatus.READY}:
+        if self.file_hashes.get(canonical) == tree_hash and desc and desc.status in {DescriptorStatus.PENDING_UPLOAD, DescriptorStatus.UPLOADED, DescriptorStatus.READY}:
             return desc
 
         if desc and desc.status == DescriptorStatus.READY and canonical not in self.file_hashes:
@@ -560,7 +565,7 @@ class WorkspaceProjectSync:
         content_hash = hashlib.sha256(content_bytes).hexdigest()
 
         desc = self.descriptors.get(canonical)
-        if self.file_hashes.get(canonical) == content_hash and desc and desc.status == DescriptorStatus.READY:
+        if self.file_hashes.get(canonical) == content_hash and desc and desc.status in {DescriptorStatus.PENDING_UPLOAD, DescriptorStatus.UPLOADED, DescriptorStatus.READY}:
             return desc
 
         rev = self.revisions.get(canonical, 0) + 1
@@ -583,7 +588,7 @@ class WorkspaceProjectSync:
 
         content_hash = hashlib.sha256(listing_text.encode('utf-8')).hexdigest()
         desc = self.descriptors.get(canonical)
-        if self.file_hashes.get(canonical) == content_hash and desc and desc.status == DescriptorStatus.READY:
+        if self.file_hashes.get(canonical) == content_hash and desc and desc.status in {DescriptorStatus.PENDING_UPLOAD, DescriptorStatus.UPLOADED, DescriptorStatus.READY}:
             return desc
 
         header = f"# WORKSPACE FOLDER LISTING: {abs_path}\n# ====================================================\n\n"
