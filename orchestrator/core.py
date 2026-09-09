@@ -394,7 +394,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                 except Exception as inner_exc:
                     exc_str = str(inner_exc)
                     if "not associated with project" in exc_str and self.workspace_sync and redispatch_count < max_redispatches:
-                        logger.warning("Detected unassociated file error from Onyx: %s. Invalidating bad descriptor(s) and retrying...", inner_exc)
+                        logger.warning("Detected unassociated file error from Onyx: %s. Re-attaching and retrying...", inner_exc)
                         import re
                         file_ids = re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", exc_str, re.I)
                         for fid in file_ids:
@@ -405,6 +405,12 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                     desc.file_id = None
                                     if cname in self.workspace_sync.file_hashes:
                                         del self.workspace_sync.file_hashes[cname]
+                                    if desc.project_id:
+                                        attached = self.client.attach_file_to_project(desc.project_id, fid)
+                                        if not attached:
+                                            desc.status = DescriptorStatus.FAILED
+                                    else:
+                                        desc.status = DescriptorStatus.FAILED
                         redispatch_count += 1
                         continue
                     raise inner_exc
