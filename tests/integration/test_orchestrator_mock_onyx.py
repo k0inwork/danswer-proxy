@@ -123,9 +123,18 @@ def test_flask_routes_with_mock_onyx(mock_onyx_server, tmp_path):
     raw_sse = stream_res.get_data(as_text=True)
     assert "data: {" in raw_sse
     assert "[DONE]" in raw_sse
-    assert "Mock Onyx" in raw_sse
-    assert "streaming" in raw_sse
-    assert "route" in raw_sse
+
+    content_pieces = []
+    for line in raw_sse.splitlines():
+        if line.startswith("data: ") and "[DONE]" not in line:
+            data_dict = json.loads(line[6:])
+            choices = data_dict.get("choices", [])
+            if choices and "delta" in choices[0]:
+                content_pieces.append(choices[0]["delta"].get("content", ""))
+    reconstructed = "".join(content_pieces)
+
+    assert "Mock Onyx" in reconstructed
+    assert "streaming route" in reconstructed
 
     # Clean up background watcher and executor
     ws_sync.stop_background_watcher()

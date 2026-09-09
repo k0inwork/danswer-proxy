@@ -286,6 +286,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
 
                 for chunk in self.client.iter_stream_text(response):
                     buffered_output += chunk
+                    turn_chunks.append(chunk)
 
                     # Check for tool call intercept opportunity before streaming to client
                     if "<local_tool>" in buffered_output and "</local_tool>" in buffered_output and not streamed_anything and self.workspace_sync and redispatch_count < max_redispatches:
@@ -341,9 +342,15 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                 redispatch_count += 1
                                 break
 
-                    turn_chunks.append(chunk)
+                    # If we might be receiving a tool call, buffer chunks without yielding until </local_tool> or non-tool text
+                    is_tool_call_prefix = (len(buffered_output) < 12 and "<local_tool>".startswith(buffered_output)) or ("<local_tool>" in buffered_output)
+                    if not streamed_anything and is_tool_call_prefix and "</local_tool>" not in buffered_output and self.workspace_sync and redispatch_count < max_redispatches:
+                        continue
+
+                    for c in turn_chunks:
+                        yield c
+                    turn_chunks = []
                     streamed_anything = True
-                    yield chunk
 
                 if not intercepted_batch:
                     chunks.extend(turn_chunks)
