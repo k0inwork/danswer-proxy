@@ -29,31 +29,35 @@ class ActionLogger:
         run_id: Optional[str] = None,
     ) -> None:
         self.workspace_root = workspace_root or os.getcwd()
-        self.base_log_dir = base_log_dir
+        self.proxy_root = os.getcwd()
 
-        # Ensure base_log_dir absolute path if relative to workspace_root
-        if not os.path.isabs(self.base_log_dir):
-            self.base_log_dir = os.path.abspath(os.path.join(self.workspace_root, self.base_log_dir))
+        # Log directory resides in the proxy execution root (where proxy runs)
+        if not os.path.isabs(base_log_dir):
+            self.base_log_dir = os.path.abspath(os.path.join(self.proxy_root, base_log_dir))
+        else:
+            self.base_log_dir = base_log_dir
 
         self.start_time = datetime.now()
         self.date_str = self.start_time.strftime("%Y-%m-%d")
+        self.time_str = self.start_time.strftime("%H%M%S")
 
         if run_id:
             self.run_id = run_id
         else:
-            timestamp_part = self.start_time.strftime("%H%M%S")
             short_uuid = uuid4().hex[:6]
-            self.run_id = f"{timestamp_part}_{short_uuid}"
+            self.run_id = f"{self.time_str}_{short_uuid}"
 
         self.run_dir = os.path.join(self.base_log_dir, self.date_str, f"run_{self.run_id}")
         os.makedirs(self.run_dir, exist_ok=True)
 
         self.actions_log_path = os.path.join(self.run_dir, "actions.log")
         self.daily_log_path = os.path.join(self.base_log_dir, f"{self.date_str}.log")
+        self.datetimed_log_path = os.path.join(self.base_log_dir, f"{self.date_str}_{self.time_str}.log")
         self.run_info_path = os.path.join(self.run_dir, "run_info.json")
 
         self._file_handler: Optional[logging.FileHandler] = None
         self._daily_file_handler: Optional[logging.FileHandler] = None
+        self._datetimed_file_handler: Optional[logging.FileHandler] = None
         self._setup_file_handler()
         self._write_run_info()
 
@@ -70,15 +74,17 @@ class ActionLogger:
         )
 
     def _setup_file_handler(self) -> None:
-        """Attaches FileHandlers for `actions.log` and `{date_str}.log` to the application logger."""
+        """Attaches FileHandlers for `actions.log`, `{date_str}.log`, and `{date_str}_{time_str}.log`."""
         app_logger = logging.getLogger(LOGGER_NAME)
         app_logger.setLevel(logging.INFO)
 
         actions_abs = os.path.abspath(self.actions_log_path)
         daily_abs = os.path.abspath(self.daily_log_path)
+        datetimed_abs = os.path.abspath(self.datetimed_log_path)
 
         has_actions_handler = False
         has_daily_handler = False
+        has_datetimed_handler = False
 
         for h in app_logger.handlers:
             if isinstance(h, logging.FileHandler):
@@ -89,6 +95,9 @@ class ActionLogger:
                 if h_abs == daily_abs:
                     self._daily_file_handler = h
                     has_daily_handler = True
+                if h_abs == datetimed_abs:
+                    self._datetimed_file_handler = h
+                    has_datetimed_handler = True
 
         formatter = logging.Formatter(
             "%(asctime)s [%(levelname)s] %(message)s",
@@ -108,6 +117,13 @@ class ActionLogger:
             daily_handler.setFormatter(formatter)
             app_logger.addHandler(daily_handler)
             self._daily_file_handler = daily_handler
+
+        if not has_datetimed_handler:
+            datetimed_handler = logging.FileHandler(self.datetimed_log_path, encoding="utf-8")
+            datetimed_handler.setLevel(logging.INFO)
+            datetimed_handler.setFormatter(formatter)
+            app_logger.addHandler(datetimed_handler)
+            self._datetimed_file_handler = datetimed_handler
 
     def _write_run_info(self) -> None:
         """Writes initial run metadata to `run_info.json`."""
