@@ -24,12 +24,14 @@ from orchestrator.workspace_sync import WorkspaceProjectSync
 
 
 class Orchestrator:
-    @staticmethod
-    def format_external_tools_for_danswer(tools: Optional[List[dict]]) -> str:
+    def format_external_tools_for_danswer(
+        self, tools: Optional[List[dict]], workspace_sync: Optional[Any] = None
+    ) -> str:
         if not tools:
             return ""
 
-        cwd = os.getcwd()
+        sync = workspace_sync or getattr(self, "workspace_sync", None)
+        cwd = sync.root if (sync and hasattr(sync, "root")) else os.getcwd()
         lines = []
         for tool in tools:
             if not isinstance(tool, dict):

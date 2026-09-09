@@ -228,9 +228,20 @@ class WorkspaceProjectSync:
             self._on_sync_failure(canonical, "BLOCKING_SYNC", exc)
             return None
 
+    def write_workspace_file(self, file_path: str, content: str) -> Optional[Descriptor]:
+        """
+        Writes content to a file in the workspace directory (self.root), creates parent directories
+        if necessary, and syncs/attaches the updated file with Onyx.
+        """
+        target_path = os.path.join(self.root, file_path) if not os.path.isabs(file_path) else file_path
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return self.on_tool_read(target_path, content)
+
     def execute_local_non_read_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
         """
-        Executes a local tool against the workspace disk (e.g. list_dir, grep_search, find_files).
+        Executes a local tool against the workspace disk (e.g. list_dir, grep_search, find_files, write_file).
         """
         t_name = (tool_name or "").lower().strip()
 
@@ -282,7 +293,59 @@ class WorkspaceProjectSync:
                 return f"Found {len(matches)} matches for '{query}':\n" + "\n".join(matches)
             return f"No matches found for '{query}' in path '{search_path}'."
 
-        # 3. Default fallback for other tools
+        # 3. Find files / glob (find_files, glob, find)
+        if t_name in {"find_files", "glob", "find"}:
+            search_pattern = args.get("pattern") or args.get("query") or "*"
+            search_path = args.get("path") or "."
+            target_dir = os.path.join(self.root, search_path) if not os.path.isabs(search_path) else search_path
+            matches = []
+            if os.path.exists(target_dir):
+                for root_dir, _, files in os.walk(target_dir):
+                    for file in files:
+                        if file.startswith("."):
+                            continue
+                        rel_f = os.path.relpath(os.path.join(root_dir, file), self.root)
+                        if search_pattern == "*" or search_pattern.lower() in file.lower():
+                            matches.append(rel_f)
+                            if len(matches) >= 50:
+                                break
+                    if len(matches) >= 50:
+                        break
+            if matches:
+                return f"Found {len(matches)} matching files for '{search_pattern}':\n" + "\n".join(matches)
+            return f"No files matching '{search_pattern}' found in path '{search_path}'."
+
+        # 4. Write / Create / Edit file operations (write_file, write, create_file, edit_file, modify_file, save_file, replace_in_file)
+        if t_name in {"write_file", "write", "create_file", "edit_file", "modify_file", "save_file", "replace_in_file"}:
+            req_path = args.get("file_path") or args.get("path") or args.get("filename") or args.get("target_file")
+            if not req_path:
+                return "Error: File path argument missing for write operation."
+
+            content = args.get("content") or args.get("text") or args.get("file_content") or args.get("code") or ""
+
+            # Check if replace_in_file style string replacement is requested
+            old_str = args.get("old_str") or args.get("search") or args.get("find")
+            new_str = args.get("new_str") or args.get("replace")
+            if old_str is not None and new_str is not None:
+                target_path = os.path.join(self.root, req_path) if not os.path.isabs(req_path) else req_path
+                if os.path.exists(target_path):
+                    try:
+                        with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
+                            existing_content = f.read()
+                        if old_str in existing_content:
+                            content = existing_content.replace(old_str, new_str)
+                        else:
+                            return f"String '{old_str}' not found in file '{req_path}'."
+                    except Exception as err:
+                        return f"Error reading file '{req_path}' for replacement: {err}"
+
+            try:
+                desc = self.write_workspace_file(req_path, content)
+                return f"Successfully wrote {len(content.encode('utf-8'))} bytes to file '{req_path}' in workspace."
+            except Exception as err:
+                return f"Error writing file '{req_path}': {err}"
+
+        # 5. Default fallback for other tools
         return f"Tool '{tool_name}' executed with arguments: {json.dumps(args, ensure_ascii=False)}"
 
     # ------------------------------------------------------------------------
