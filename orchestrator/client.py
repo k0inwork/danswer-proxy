@@ -122,47 +122,47 @@ class DanswerClient:
         logger.warning("Timed out waiting for file processing of file_id=%s; proceeding", file_id)
         return True
 
-    def attach_file_to_project(self, project_id: str, file_id: str) -> bool:
+    def attach_file_to_project(self, project_id: Any, file_id: str) -> bool:
         """Links an uploaded file_id to a project_id across candidate Onyx endpoints."""
-        pid = (project_id or "").strip()
+        pid_str = str(project_id).strip() if project_id is not None else ""
         fid = (file_id or "").strip()
-        if not pid or not fid:
+        if not pid_str or not fid:
             return False
 
         endpoints = [
-            f"{self.danswer_url}/api/user/projects/{pid}/files/{fid}",
+            (f"{self.danswer_url}/api/user/projects/{pid_str}/files/{fid}", "POST"),
+            (f"{self.danswer_url}/api/user/projects/{pid_str}/file/{fid}", "POST"),
+            (f"{self.danswer_url}/api/user/projects/{pid_str}/files", "POST"),
         ]
 
-        for ep in endpoints:
+        for ep, method in endpoints:
             try:
-                res = self._safe_request("POST", ep, timeout=API_TIMEOUT)
+                if ep.endswith(f"/projects/{pid_str}/files"):
+                    pid_val = int(pid_str) if pid_str.isdigit() else pid_str
+                    res = self._safe_request(method, ep, json={"file_ids": [fid], "file_id": fid}, timeout=API_TIMEOUT)
+                else:
+                    res = self._safe_request(method, ep, timeout=API_TIMEOUT)
+
                 if res.status_code in (200, 201, 204):
                     get_run_logger().log_action(
                         category="FILE_ATTACH",
                         action="SUCCESS",
-                        details={"project_id": pid, "file_id": fid, "endpoint": ep},
-                    )
-                    return True
-                elif res.status_code in (400, 404, 405, 409):
-                    logger.debug("Project association returned code %s (treating as auto-attached or candidate skipped)", res.status_code)
-                    get_run_logger().log_action(
-                        category="FILE_ATTACH",
-                        action="SKIPPED",
-                        details={"project_id": pid, "file_id": fid, "status_code": res.status_code},
+                        details={"project_id": pid_str, "file_id": fid, "endpoint": ep},
                     )
                     return True
                 else:
-                    logger.warning("Attachment to project request %s returned code %s", ep, res.status_code)
+                    logger.debug("Attachment candidate endpoint %s returned code %s", ep, res.status_code)
             except Exception as exc:
                 logger.debug("Failed endpoint %s: %s", ep, exc)
                 continue
 
+        logger.warning("Could not attach file_id=%s to project_id=%s across candidate endpoints.", fid, pid_str)
         get_run_logger().log_action(
             category="FILE_ATTACH",
-            action="COMPLETED",
-            details={"project_id": pid, "file_id": fid},
+            action="FAILED",
+            details={"project_id": pid_str, "file_id": fid},
         )
-        return True
+        return False
 
     def fetch_personas(self) -> List[Dict[str, Any]]:
         response = self.session.get(f"{self.danswer_url}/api/persona", timeout=API_TIMEOUT)
@@ -305,15 +305,16 @@ class DanswerClient:
         )
 
     def upload_project_file(
-        self, project_id: str, filename: str, content_bytes: bytes
+        self, project_id: Any, filename: str, content_bytes: bytes
     ) -> Dict[str, Any]:
-        pid = (project_id or "").strip()
+        pid_str = str(project_id).strip() if project_id is not None else ""
+        pid_val = int(pid_str) if pid_str.isdigit() else pid_str
         url = f"{self.danswer_url}/api/user/projects/file/upload"
 
         upload_name = filename if filename.endswith(".txt") else f"{filename}.txt"
         files = {"files": (upload_name, content_bytes, "text/plain")}
         data = {
-            "project_id": str(pid) if pid else "",
+            "project_id": pid_val if pid_val else "",
             "temp_id_map": "{}",
         }
 
@@ -326,8 +327,17 @@ class DanswerClient:
                 timeout=API_TIMEOUT,
             )
 
-            if response.status_code == 422 and pid.isdigit():
-                data["project_id"] = int(pid)
+            if response.status_code == 422 and pid_str.isdigit():
+                data["project_id"] = int(pid_str)
+                response = self._safe_request(
+                    "POST",
+                    url,
+                    files={"files": (upload_name, content_bytes, "text/plain")},
+                    data=data,
+                    timeout=API_TIMEOUT,
+                )
+            elif response.status_code == 422 and isinstance(pid_val, int):
+                data["project_id"] = str(pid_val)
                 response = self._safe_request(
                     "POST",
                     url,
@@ -366,7 +376,7 @@ class DanswerClient:
                 file_path=filename,
                 canonical_name=upload_name,
                 file_id=str(ret_dict.get("id") or ""),
-                project_id=pid,
+                project_id=pid_str,
                 status="UPLOADED",
             )
             return ret_dict
@@ -375,7 +385,7 @@ class DanswerClient:
             get_run_logger().log_file_upload(
                 file_path=filename,
                 canonical_name=upload_name,
-                project_id=pid,
+                project_id=pid_str,
                 status="FAILED",
                 error=str(exc),
             )
@@ -413,16 +423,18 @@ class DanswerClient:
     def create_chat_session(
         self,
         persona_id: int,
-        project_id: Optional[str] = None,
+        project_id: Optional[Any] = None,
         kind: str = "segment",
     ) -> str:
         session_uid = uuid4().hex[:8]
         session_name = f"llmproxy: {session_uid}"
 
+        pid_val = int(project_id) if isinstance(project_id, str) and project_id.isdigit() else project_id
+
         payload = {
             "persona_id": persona_id,
             "description": session_name,
-            "project_id": project_id,
+            "project_id": pid_val,
         }
 
         logger.info("Creating Onyx session name=%s persona_id=%s project_id=%s kind=%s", session_name, persona_id, project_id, kind)

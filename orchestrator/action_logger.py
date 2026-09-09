@@ -49,9 +49,11 @@ class ActionLogger:
         os.makedirs(self.run_dir, exist_ok=True)
 
         self.actions_log_path = os.path.join(self.run_dir, "actions.log")
+        self.daily_log_path = os.path.join(self.base_log_dir, f"{self.date_str}.log")
         self.run_info_path = os.path.join(self.run_dir, "run_info.json")
 
         self._file_handler: Optional[logging.FileHandler] = None
+        self._daily_file_handler: Optional[logging.FileHandler] = None
         self._setup_file_handler()
         self._write_run_info()
 
@@ -68,25 +70,44 @@ class ActionLogger:
         )
 
     def _setup_file_handler(self) -> None:
-        """Attaches a FileHandler for `actions.log` to the application logger."""
+        """Attaches FileHandlers for `actions.log` and `{date_str}.log` to the application logger."""
         app_logger = logging.getLogger(LOGGER_NAME)
         app_logger.setLevel(logging.INFO)
 
-        # Check if handler for this file already exists
-        for h in app_logger.handlers:
-            if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == self.actions_log_path:
-                self._file_handler = h
-                return
+        actions_abs = os.path.abspath(self.actions_log_path)
+        daily_abs = os.path.abspath(self.daily_log_path)
 
-        file_handler = logging.FileHandler(self.actions_log_path, encoding="utf-8")
-        file_handler.setLevel(logging.INFO)
+        has_actions_handler = False
+        has_daily_handler = False
+
+        for h in app_logger.handlers:
+            if isinstance(h, logging.FileHandler):
+                h_abs = os.path.abspath(getattr(h, "baseFilename", ""))
+                if h_abs == actions_abs:
+                    self._file_handler = h
+                    has_actions_handler = True
+                if h_abs == daily_abs:
+                    self._daily_file_handler = h
+                    has_daily_handler = True
+
         formatter = logging.Formatter(
             "%(asctime)s [%(levelname)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-        file_handler.setFormatter(formatter)
-        app_logger.addHandler(file_handler)
-        self._file_handler = file_handler
+
+        if not has_actions_handler:
+            file_handler = logging.FileHandler(self.actions_log_path, encoding="utf-8")
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(formatter)
+            app_logger.addHandler(file_handler)
+            self._file_handler = file_handler
+
+        if not has_daily_handler:
+            daily_handler = logging.FileHandler(self.daily_log_path, encoding="utf-8")
+            daily_handler.setLevel(logging.INFO)
+            daily_handler.setFormatter(formatter)
+            app_logger.addHandler(daily_handler)
+            self._daily_file_handler = daily_handler
 
     def _write_run_info(self) -> None:
         """Writes initial run metadata to `run_info.json`."""

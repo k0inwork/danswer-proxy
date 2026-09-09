@@ -29,11 +29,13 @@ def test_action_logger_directory_structure(temp_log_dir):
 
     assert os.path.exists(logger_inst.run_dir)
     assert os.path.exists(logger_inst.actions_log_path)
+    assert os.path.exists(logger_inst.daily_log_path)
     assert os.path.exists(logger_inst.run_info_path)
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     assert date_str in logger_inst.run_dir
     assert "run_test_run_123" in logger_inst.run_dir
+    assert logger_inst.daily_log_path.endswith(f"{date_str}.log")
 
     with open(logger_inst.run_info_path, "r", encoding="utf-8") as f:
         run_info = json.load(f)
@@ -142,6 +144,11 @@ def test_action_logger_captures_standard_logging(temp_log_dir):
         log_content = f.read()
 
     assert "Test info log message from standard logging module" in log_content
+
+    with open(logger_inst.daily_log_path, "r", encoding="utf-8") as f:
+        daily_content = f.read()
+
+    assert "Test info log message from standard logging module" in daily_content
 
 
 def test_init_run_logger_singleton(temp_log_dir):
