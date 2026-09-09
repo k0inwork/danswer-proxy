@@ -139,6 +139,32 @@ class TestFolderOptionAndWorkspaceWrites(unittest.TestCase):
         self.assertIn("Found 1 matching files for 'utils':", find_res)
         self.assertIn("src/utils.py", find_res)
 
+    def test_sanitize_path_for_root_folder(self):
+        """Test sanitize_path uses workspace folder basename instead of defaulting to 'root'."""
+        folder_basename = os.path.basename(self.temp_dir)
+        clean_basename = folder_basename.replace("/", "_").replace("\\", "_").replace(".", "_").strip("_")
+
+        sanitized = self.sync.sanitize_path(self.temp_dir)
+        self.assertEqual(sanitized, clean_basename)
+
+        top_desc = self.sync.update_top_folder()
+        self.assertIsNotNone(top_desc)
+        self.assertEqual(top_desc.canonical_name, f"TOP_FOLDER_{clean_basename}.txt")
+
+    def test_update_top_folder_deduplicates_pending_upload(self):
+        """Test update_top_folder skips re-uploading when status is PENDING_UPLOAD and tree hash is unchanged."""
+        top_desc = self.sync.update_top_folder()
+        self.assertIsNotNone(top_desc)
+
+        # Explicitly test PENDING_UPLOAD status deduplication
+        top_desc.status = DescriptorStatus.PENDING_UPLOAD
+
+        # Mock dispatch_file_sync to check it is not called again on subsequent watcher ticks
+        with patch.object(self.sync, "dispatch_file_sync") as mock_dispatch:
+            second_desc = self.sync.update_top_folder()
+            mock_dispatch.assert_not_called()
+            self.assertEqual(second_desc, top_desc)
+
 
 if __name__ == "__main__":
     unittest.main()
