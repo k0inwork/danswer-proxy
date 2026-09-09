@@ -117,7 +117,7 @@ class StreamingXmlToolParser:
                 start_idx = self.buffer.find("<local_tool>")
                 if start_idx == -1:
                     partial_match = False
-                    for i in range(1, len("<local_tool>")):
+                    for i in range(len("<local_tool>") - 1, 0, -1):
                         if "<local_tool>"[:i] == self.buffer[-i:]:
                             cutoff = len(self.buffer) - i
                             if cutoff > 0:
@@ -271,7 +271,7 @@ def extract_last_tool_execution_context(
                     0,
                     f"[TOOL RESULT ({tool_id})]: File '{file_path}' uploaded and staged (Status: {desc.status.value if desc else 'FAILED'}).\nContent output:\n{content}"
                 )
-            elif workspace_sync and (fn_name in {"bash", "list_dir", "ls"} or "ls" in fn_args_str or "dir" in fn_args_str):
+            elif workspace_sync and (fn_name in {"bash", "list_dir", "ls", "dir", "run_bash"}):
                 desc = workspace_sync.on_folder_read(os.getcwd(), content)
 
                 tool_blocks.insert(

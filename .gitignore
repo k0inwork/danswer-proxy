@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+workspace_sync_cache.json
+persona_matrix_cache.json

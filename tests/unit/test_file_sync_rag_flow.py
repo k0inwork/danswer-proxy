@@ -13,30 +13,42 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-# Mock third-party libraries not in the standard library
-requests_mock = types.ModuleType("requests")
-requests_mock.adapters = types.ModuleType("requests.adapters")
-requests_mock.adapters.HTTPAdapter = MagicMock()
-requests_mock.Session = MagicMock()
-requests_mock.Response = MagicMock()
+# Safely provide mock shims for libraries if run in minimalist python envs
+try:
+    import requests
+except ImportError:
+    requests_mock = types.ModuleType("requests")
+    class HTTPError(Exception): pass
+    requests_mock.HTTPError = HTTPError
+    requests_mock.adapters = types.ModuleType("requests.adapters")
+    requests_mock.adapters.HTTPAdapter = MagicMock()
+    requests_mock.Session = MagicMock()
+    requests_mock.Response = MagicMock()
+    sys.modules["requests"] = requests_mock
+    sys.modules["requests.adapters"] = requests_mock.adapters
 
-urllib3_mock = types.ModuleType("urllib3")
-urllib3_mock.util = types.ModuleType("urllib3.util")
-urllib3_mock.util.retry = types.ModuleType("urllib3.util.retry")
-urllib3_mock.util.retry.Retry = MagicMock()
+try:
+    import urllib3
+except ImportError:
+    urllib3_mock = types.ModuleType("urllib3")
+    urllib3_mock.util = types.ModuleType("urllib3.util")
+    urllib3_mock.util.retry = types.ModuleType("urllib3.util.retry")
+    urllib3_mock.util.retry.Retry = MagicMock()
+    sys.modules["urllib3"] = urllib3_mock
+    sys.modules["urllib3.util"] = urllib3_mock.util
+    sys.modules["urllib3.util.retry"] = urllib3_mock.util.retry
 
-flask_mock = types.ModuleType("flask")
-flask_mock.Flask = MagicMock()
-flask_mock.Response = MagicMock()
-flask_mock.request = MagicMock()
-flask_mock.stream_with_context = MagicMock()
-
-sys.modules["requests"] = requests_mock
-sys.modules["requests.adapters"] = requests_mock.adapters
-sys.modules["urllib3"] = urllib3_mock
-sys.modules["urllib3.util"] = urllib3_mock.util
-sys.modules["urllib3.util.retry"] = urllib3_mock.util.retry
-sys.modules["flask"] = flask_mock
+try:
+    import flask
+except ImportError:
+    flask_mock = types.ModuleType("flask")
+    mock_app = MagicMock()
+    mock_app.route = lambda *a, **kw: (lambda fn: fn)
+    flask_mock.Flask = lambda name: mock_app
+    flask_mock.Response = MagicMock()
+    flask_mock.request = MagicMock()
+    flask_mock.stream_with_context = lambda x: x
+    sys.modules["flask"] = flask_mock
 
 import json
 import time

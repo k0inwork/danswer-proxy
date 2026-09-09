@@ -520,12 +520,55 @@ def extract_local_tool_invocation(text: str) -> Optional[Dict[str, Any]]:
 class StreamingXmlToolParser:
     def __init__(self) -> None:
         self.buffer: str = ""
-        self.in_tool: bool = False
+        self.in_tool_tag: bool = False
 
-    def feed(self, chunk: str) -> Tuple[str, List[Dict[str, Any]]]:
+    def feed(self, chunk: str) -> Tuple[List[str], List[Dict[str, Any]]]:
         self.buffer += chunk
-        tools = extract_all_local_tool_invocations(self.buffer)
-        return chunk, tools
+        text_chunks: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+
+        while self.buffer:
+            if not self.in_tool_tag:
+                start_idx = self.buffer.find("<local_tool>")
+                if start_idx == -1:
+                    partial_match = False
+                    for i in range(len("<local_tool>") - 1, 0, -1):
+                        if "<local_tool>"[:i] == self.buffer[-i:]:
+                            cutoff = len(self.buffer) - i
+                            if cutoff > 0:
+                                text_chunks.append(self.buffer[:cutoff])
+                                self.buffer = self.buffer[cutoff:]
+                            partial_match = True
+                            break
+                    if not partial_match:
+                        text_chunks.append(self.buffer)
+                        self.buffer = ""
+                    break
+                else:
+                    if start_idx > 0:
+                        text_chunks.append(self.buffer[:start_idx])
+                    self.buffer = self.buffer[start_idx:]
+                    self.in_tool_tag = True
+
+            if self.in_tool_tag:
+                end_idx = self.buffer.find("</local_tool>")
+                if end_idx == -1:
+                    break
+                full_xml = self.buffer[: end_idx + len("</local_tool>")]
+                self.buffer = self.buffer[end_idx + len("</local_tool>"):]
+                self.in_tool_tag = False
+                tool_inv = extract_local_tool_invocation(full_xml)
+                if tool_inv:
+                    tool_calls.append({
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": tool_inv["name"],
+                            "arguments": json.dumps(tool_inv["arguments"])
+                        }
+                    })
+
+        return text_chunks, tool_calls
 
 
 def clean_user_message(msg: str) -> str:
