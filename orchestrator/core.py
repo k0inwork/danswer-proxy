@@ -400,6 +400,11 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         for fid in file_ids:
                             for cname, desc in list(self.workspace_sync.descriptors.items()):
                                 if desc.file_id == fid:
+                                    logger.info("Invalidating unassociated file descriptor '%s' (file_id=%s)", cname, fid)
+                                    desc.status = DescriptorStatus.FAILED
+                                    desc.file_id = None
+                                    if cname in self.workspace_sync.file_hashes:
+                                        del self.workspace_sync.file_hashes[cname]
                                     if desc.project_id:
                                         attached = self.client.attach_file_to_project(desc.project_id, fid)
                                         if not attached:
