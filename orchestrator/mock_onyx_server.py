@@ -92,6 +92,21 @@ def get_user_projects():
     return jsonify({"projects": STATE["projects"]})
 
 
+@app.route("/api/user/files/recent", methods=["GET"])
+def get_recent_files():
+    """Return recently uploaded user files with status COMPLETED."""
+    recent = []
+    for fid, fdict in STATE["uploaded_files"].items():
+        recent.append({
+            "id": fid,
+            "file_id": fid,
+            "name": fdict.get("name", "file.txt"),
+            "file_type": fdict.get("type", "plain_text"),
+            "status": "COMPLETED",
+        })
+    return jsonify(recent)
+
+
 @app.route("/api/user/projects/files/<project_id>", methods=["GET"])
 def get_project_files(project_id: str):
     """Return files associated with a project."""
@@ -126,9 +141,11 @@ def upload_project_file():
 
     file_descriptor = {
         "id": file_id,
+        "file_id": file_id,
         "name": filename,
         "type": "plain_text",
         "chat_file_type": "plain_text",
+        "status": "COMPLETED",
     }
 
     STATE["uploaded_files"][file_id] = file_descriptor

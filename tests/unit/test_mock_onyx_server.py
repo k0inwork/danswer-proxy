@@ -31,7 +31,7 @@ def test_mock_onyx_personas_and_tools(mock_onyx_server):
 
 
 def test_mock_onyx_projects_and_files(mock_onyx_server):
-    """Test user projects, project file upload, attachment, listing, and deletion."""
+    """Test user projects, project file upload, processing wait, attachment, listing, and deletion."""
     client = DanswerClient(danswer_url=mock_onyx_server, api_token="test-token")
 
     # Projects
@@ -46,6 +46,14 @@ def test_mock_onyx_projects_and_files(mock_onyx_server):
     upload_res = client.upload_project_file(project_id=pid, filename="sample.txt", content_bytes=b"Hello Onyx")
     assert upload_res["id"].startswith("file-")
     fid = upload_res["id"]
+
+    # Verify recent files listing and wait for file processing
+    recent = client.get_recent_files()
+    assert isinstance(recent, list)
+    assert any(f.get("id") == fid or f.get("file_id") == fid for f in recent)
+
+    processed = client.wait_for_file_processing(file_id=fid, timeout=5.0)
+    assert processed is True
 
     # Attach file
     attached = client.attach_file_to_project(project_id=pid, file_id=fid)

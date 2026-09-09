@@ -105,6 +105,9 @@ class WorkspaceProjectSync:
             fid = str(res.get("id", ""))
             ftype = res.get("file_type", "plain_text")
 
+            if fid and hasattr(self.client, "wait_for_file_processing"):
+                self.client.wait_for_file_processing(fid)
+
             # Fire Uploaded Callback
             self._on_upload_complete(canonical, fid, ftype)
         except Exception as exc:
@@ -152,7 +155,7 @@ class WorkspaceProjectSync:
         timeout: float = 10.0,
     ) -> Optional[Descriptor]:
         """
-        Synchronously uploads and attaches a workspace file to the active Onyx project.
+        Synchronously uploads, waits for processing, and attaches a workspace file to the active Onyx project.
         Blocks the calling thread until DescriptorStatus is READY or FAILED.
         """
         canonical = self.canonical_name(file_path, is_dir=False)
@@ -204,9 +207,14 @@ class WorkspaceProjectSync:
             )
             fid = str(res.get("id", ""))
             ftype = res.get("file_type", "plain_text")
+
+            # 3. Wait for file processing
+            if fid and hasattr(self.client, "wait_for_file_processing"):
+                self.client.wait_for_file_processing(fid)
+
             self._on_upload_complete(canonical, fid, ftype)
 
-            # 3. Direct attach
+            # 4. Direct attach
             if self.project_id and fid:
                 self.client.attach_file_to_project(self.project_id, fid)
                 self._on_attach_complete(canonical)
