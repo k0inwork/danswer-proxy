@@ -46,10 +46,15 @@ class DanswerClient:
     def raise_for_api_error(response: requests.Response) -> None:
         try:
             response.raise_for_status()
-        except requests.HTTPError as exc:
-            raise RuntimeError(
-                f"Onyx API error {response.status_code}: {response.text[:4000]}"
-            ) from exc
+        except Exception as exc:
+            if hasattr(requests, "HTTPError") and isinstance(exc, getattr(requests, "HTTPError")):
+                raise RuntimeError(
+                    f"Onyx API error {getattr(response, 'status_code', 'unknown')}: {str(getattr(response, 'text', ''))[:4000]}"
+                ) from exc
+            elif getattr(response, "status_code", 200) >= 400:
+                raise RuntimeError(
+                    f"Onyx API error {getattr(response, 'status_code', 'unknown')}: {str(getattr(response, 'text', ''))[:4000]}"
+                ) from exc
 
     def _safe_request(self, method: str, url: str, **kwargs) -> requests.Response:
         kwargs["allow_redirects"] = False
