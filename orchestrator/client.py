@@ -3,6 +3,7 @@ Resilient HTTP client for Onyx / Danswer API with retry adapters and SSE streams
 """
 
 import json
+import time
 from typing import Any, Dict, Iterator, List, Optional
 from uuid import uuid4
 
@@ -68,6 +69,57 @@ class DanswerClient:
                 elif loc.startswith(self.danswer_url):
                     return self.session.request(method, loc, **kwargs)
         return response
+
+    def get_recent_files(self) -> Optional[List[Dict[str, Any]]]:
+        """Fetch recently uploaded user files to check processing status and metadata."""
+        try:
+            response = self._safe_request("GET", f"{self.danswer_url}/api/user/files/recent", timeout=API_TIMEOUT)
+            if response.status_code in (200, 201):
+                data = response.json()
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    return data.get("files") or data.get("user_files") or data.get("recent_files") or []
+        except Exception as exc:
+            logger.debug("Failed to fetch recent files: %s", exc)
+        return None
+
+    def wait_for_file_processing(
+        self, file_id: str, timeout: float = 30.0, poll_interval: float = 0.2
+    ) -> bool:
+        """
+        Polls Onyx until file processing status is COMPLETED or FAILED.
+        Returns True if processing succeeded or if status endpoint is unneeded/unsupported.
+        """
+        if not file_id:
+            return True
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            recent_files = self.get_recent_files()
+            if recent_files is not None:
+                found = False
+                for file_obj in recent_files:
+                    fid = str(file_obj.get("id") or file_obj.get("file_id") or "")
+                    if fid == str(file_id):
+                        found = True
+                        status = str(file_obj.get("status") or "COMPLETED").upper()
+                        if status == "COMPLETED":
+                            logger.info("File processing completed for file_id=%s", file_id)
+                            return True
+                        elif status == "FAILED":
+                            logger.warning("File processing failed for file_id=%s", file_id)
+                            return False
+                        break
+                if not found and time.time() - start_time > 2.0:
+                    return True
+            else:
+                return True
+
+            time.sleep(poll_interval)
+
+        logger.warning("Timed out waiting for file processing of file_id=%s; proceeding", file_id)
+        return True
 
     def attach_file_to_project(self, project_id: str, file_id: str) -> bool:
         """Links an uploaded file_id to a project_id across candidate Onyx endpoints."""
