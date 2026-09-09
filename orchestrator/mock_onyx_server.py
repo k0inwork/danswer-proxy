@@ -5,6 +5,7 @@ Simulates Onyx REST API endpoints and SSE streaming.
 
 import argparse
 import json
+import time
 import uuid
 from typing import Any, Dict, List
 from flask import Flask, Response, jsonify, request
@@ -223,6 +224,15 @@ def delete_chat_session(session_id: str):
     return "", 200
 
 
+@app.route("/api/chat/session-history/<session_id>", methods=["GET"])
+def get_session_history(session_id: str):
+    """Return stored chat history for a mock session."""
+    session = STATE["chat_sessions"].get(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    return jsonify({"history": session.get("history", [])}), 200
+
+
 @app.route("/api/chat/send-chat-message", methods=["POST"])
 def send_chat_message():
     """Send a chat message to Onyx (supports JSON & SSE streaming)."""
@@ -230,6 +240,18 @@ def send_chat_message():
     message = data.get("message", "")
     stream = data.get("stream", False)
     session_id = data.get("chat_session_id")
+    file_descriptors = data.get("file_descriptors", [])
+    chunk_delay = float(data.get("chunk_delay", 0.0) or request.args.get("chunk_delay", 0.0) or 0.0)
+
+    # Record user message in session history if session exists
+    if session_id and session_id in STATE["chat_sessions"]:
+        if "history" not in STATE["chat_sessions"][session_id]:
+            STATE["chat_sessions"][session_id]["history"] = []
+        STATE["chat_sessions"][session_id]["history"].append({
+            "role": "user",
+            "content": message,
+            "file_descriptors": file_descriptors,
+        })
 
     # Handle Mode Detector classifier call
     if "[SYSTEM INSTRUCTION - MODE DETECTOR]" in message:
@@ -245,15 +267,56 @@ def send_chat_message():
             "answer_citationless": detector_reply,
         }), 200
 
-    # Clean user query if prompt wrappers are present
-    user_query = message
-    if "USER MESSAGE:" in message:
-        parts = message.split("USER MESSAGE:")
-        user_query = parts[-1].strip()
-    elif "--- USER MESSAGE FOR CLASSIFICATION ---" in message:
-        user_query = message.split("--- USER MESSAGE FOR CLASSIFICATION ---")[1].split("--- END USER MESSAGE ---")[0].strip()
+    # Extract actual clean user query text
+    user_actual_text = message
+    if "--- USER MESSAGE FOR CLASSIFICATION ---" in user_actual_text:
+        user_actual_text = user_actual_text.split("--- USER MESSAGE FOR CLASSIFICATION ---")[1].split("--- END USER MESSAGE ---")[0]
+    elif "USER MESSAGE:" in user_actual_text:
+        user_actual_text = user_actual_text.split("USER MESSAGE:")[-1]
+    elif "</workspace_context>" in user_actual_text:
+        user_actual_text = user_actual_text.split("</workspace_context>")[-1]
 
-    response_text = f"Mock Onyx answer to: {user_query}"
+    if "[SYSTEM INSTRUCTION" in user_actual_text:
+        user_actual_text = user_actual_text.split("[SYSTEM INSTRUCTION")[0]
+
+    user_actual_text = user_actual_text.strip()
+
+    # Determine response text based on attached file descriptors or tool call triggers
+    requested_file_attached = False
+    target_path = "src/auth.py"
+    has_read_trigger = ("read file" in user_actual_text.lower() or "read_file" in user_actual_text.lower() or "[TRIGGER_TOOL_READ_FILE]" in message)
+    if has_read_trigger:
+        for word in user_actual_text.split():
+            clean_w = word.strip(" '\"\t\n,")
+            if (clean_w.endswith(".py") or clean_w.endswith(".txt")) and not clean_w.startswith("["):
+                target_path = clean_w
+                break
+        if file_descriptors:
+            for fd in file_descriptors:
+                fname = fd.get("name", "")
+                target_token = target_path.replace("/", "_").replace(".", "_")
+                if target_token in fname or target_path in fname:
+                    requested_file_attached = True
+                    break
+
+    if has_read_trigger and not requested_file_attached:
+        response_text = f'<local_tool><name>read_file</name><arguments>{{"file_path": "{target_path}"}}</arguments></local_tool>'
+    elif file_descriptors:
+        attached_info = []
+        for fd in file_descriptors:
+            fid = fd.get("id") or fd.get("file_id")
+            fname = fd.get("name") or fid
+            attached_info.append(f"{fname} ({fid})")
+        files_str = ", ".join(attached_info)
+        response_text = f"Mock Onyx answer to: {user_actual_text} [Attached files: {files_str}]"
+    else:
+        response_text = f"Mock Onyx answer to: {user_actual_text}"
+
+    if session_id and session_id in STATE["chat_sessions"]:
+        STATE["chat_sessions"][session_id]["history"].append({
+            "role": "assistant",
+            "content": response_text,
+        })
 
     if stream:
         def generate_sse():
@@ -261,6 +324,8 @@ def send_chat_message():
             if not chunks:
                 chunks = [response_text]
             for chunk in chunks:
+                if chunk_delay > 0:
+                    time.sleep(chunk_delay)
                 payload = json.dumps({"answer_piece": chunk})
                 yield f"data: {payload}\n\n"
             yield "data: [DONE]\n\n"

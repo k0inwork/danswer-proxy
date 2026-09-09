@@ -57,7 +57,10 @@ class WorkspaceProjectSync:
 
         # Trigger second stage immediately upon upload completion
         if desc.project_id:
-            self.executor.submit(self._async_attach_task, canonical, desc.project_id, file_id)
+            try:
+                self.executor.submit(self._async_attach_task, canonical, desc.project_id, file_id)
+            except Exception as exc:
+                logger.warning("Could not submit async attach task for '%s': %s", canonical, exc)
 
     def _on_attach_complete(self, canonical: str) -> None:
         """Callback 2: Triggered strictly when project-association API call succeeds."""
