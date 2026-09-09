@@ -15,6 +15,7 @@ from orchestrator.config import (
     API_TIMEOUT,
     MODELS,
     REAL_TALK_MODEL,
+    get_run_logger,
     logger,
 )
 from orchestrator.models import session_registry
@@ -136,9 +137,19 @@ class DanswerClient:
             try:
                 res = self._safe_request("POST", ep, timeout=API_TIMEOUT)
                 if res.status_code in (200, 201, 204):
+                    get_run_logger().log_action(
+                        category="FILE_ATTACH",
+                        action="SUCCESS",
+                        details={"project_id": pid, "file_id": fid, "endpoint": ep},
+                    )
                     return True
                 elif res.status_code in (400, 404, 405, 409):
                     logger.debug("Project association returned code %s (treating as auto-attached or candidate skipped)", res.status_code)
+                    get_run_logger().log_action(
+                        category="FILE_ATTACH",
+                        action="SKIPPED",
+                        details={"project_id": pid, "file_id": fid, "status_code": res.status_code},
+                    )
                     return True
                 else:
                     logger.warning("Attachment to project request %s returned code %s", ep, res.status_code)
@@ -146,6 +157,11 @@ class DanswerClient:
                 logger.debug("Failed endpoint %s: %s", ep, exc)
                 continue
 
+        get_run_logger().log_action(
+            category="FILE_ATTACH",
+            action="COMPLETED",
+            details={"project_id": pid, "file_id": fid},
+        )
         return True
 
     def fetch_personas(self) -> List[Dict[str, Any]]:
@@ -282,6 +298,11 @@ class DanswerClient:
                 logger.debug("Non-fatal exception while deleting file %s at %s: %s", fid, url, exc)
 
         logger.info("Executed deletion cleanup for file_id=%s", fid)
+        get_run_logger().log_action(
+            category="FILE_DELETE",
+            action="DELETE_PROJECT_FILE",
+            details={"file_id": fid, "project_id": pid},
+        )
 
     def upload_project_file(
         self, project_id: str, filename: str, content_bytes: bytes
@@ -317,6 +338,7 @@ class DanswerClient:
 
             self.raise_for_api_error(response)
             res_data = response.json()
+            ret_dict = {}
             if isinstance(res_data, dict):
                 rejected = res_data.get("rejected_files")
                 if isinstance(rejected, list) and rejected:
@@ -330,15 +352,33 @@ class DanswerClient:
                 if isinstance(ret, dict):
                     if not ret.get("type"):
                         ret["type"] = ret.get("chat_file_type") or "plain_text"
-                    return ret
-            if isinstance(res_data, list) and res_data:
+                    ret_dict = ret
+            elif isinstance(res_data, list) and res_data:
                 ret = res_data[0]
                 if isinstance(ret, dict) and not ret.get("type"):
                     ret["type"] = ret.get("chat_file_type") or "plain_text"
-                return ret
-            return {"id": upload_name, "name": upload_name, "type": "plain_text"}
+                ret_dict = ret if isinstance(ret, dict) else {}
+
+            if not ret_dict:
+                ret_dict = {"id": upload_name, "name": upload_name, "type": "plain_text"}
+
+            get_run_logger().log_file_upload(
+                file_path=filename,
+                canonical_name=upload_name,
+                file_id=str(ret_dict.get("id") or ""),
+                project_id=pid,
+                status="UPLOADED",
+            )
+            return ret_dict
         except Exception as exc:
             logger.warning("Upload project file '%s' failed on %s: %s", upload_name, url, exc)
+            get_run_logger().log_file_upload(
+                file_path=filename,
+                canonical_name=upload_name,
+                project_id=pid,
+                status="FAILED",
+                error=str(exc),
+            )
             raise
 
     def delete_chat_session(self, session_id: str, kind: str = "unknown") -> None:
@@ -348,6 +388,11 @@ class DanswerClient:
         )
         self.raise_for_api_error(response)
         session_registry.unregister(session_id, kind)
+        get_run_logger().log_action(
+            category="SESSION",
+            action="DELETE_CHAT_SESSION",
+            details={"session_id": session_id, "kind": kind},
+        )
 
     @staticmethod
     def extract_tool_ids(tools: Any) -> List[int]:
@@ -396,6 +441,16 @@ class DanswerClient:
 
         session_id_str = str(session_id)
         session_registry.register(session_id_str, kind)
+        get_run_logger().log_action(
+            category="SESSION",
+            action="CREATE_CHAT_SESSION",
+            details={
+                "session_id": session_id_str,
+                "persona_id": persona_id,
+                "project_id": project_id,
+                "kind": kind,
+            },
+        )
         return session_id_str
 
     @staticmethod
@@ -455,6 +510,16 @@ class DanswerClient:
             stream,
             len(message),
             len(sanitized_descriptors),
+        )
+
+        get_run_logger().log_llm_request(
+            model=model,
+            session_id=session_id,
+            message=message,
+            temperature=temperature,
+            allowed_tools=allowed_tool_ids,
+            descriptors=sanitized_descriptors,
+            extra={"stream": stream, "disable_search": disable_search},
         )
 
         response = self.session.post(

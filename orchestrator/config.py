@@ -8,6 +8,12 @@ from pprint import pformat
 from typing import Any, Dict, Optional
 from flask import request
 
+from orchestrator.action_logger import (
+    ActionLogger,
+    get_run_logger,
+    init_run_logger,
+)
+
 
 # ============================================================================
 # Environment & Server Configuration
@@ -176,6 +182,18 @@ def log_incoming_request(data: Dict[str, Any]) -> None:
     }
 
     logger.info("INCOMING OPENAI REQUEST\n%s", pformat(request_info, sort_dicts=False))
+    get_run_logger().log_action(
+        category="API_REQUEST",
+        action="INCOMING",
+        details={
+            "method": request.method,
+            "path": request.path,
+            "conversation_id": possible_ids.get("conversation_id") or possible_ids.get("X-Conversation-ID"),
+            "model": data.get("model"),
+            "stream": data.get("stream"),
+            "message_count": len(messages),
+        },
+    )
 
 
 def log_session_event(
@@ -190,4 +208,13 @@ def log_session_event(
         conversation_id,
         session_id,
         persona_id,
+    )
+    get_run_logger().log_action(
+        category="SESSION",
+        action=event,
+        details={
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+            "persona_id": persona_id,
+        },
     )
