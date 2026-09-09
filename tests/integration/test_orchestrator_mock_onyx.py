@@ -65,6 +65,68 @@ def test_orchestrator_e2e_with_mock_onyx(mock_onyx_server, tmp_path):
     ws_sync.executor.shutdown(wait=True)
 
 
+def test_repeat_run_same_project_top_folder_handling(mock_onyx_server, tmp_path):
+    """
+    Test that running WorkspaceProjectSync multiple times in the same folder:
+    1. Uses the same project name formatted as workspace-<fullpathhash to folder>.
+    2. Reuses the same project_id in Onyx across runs.
+    3. Does not create additional TOP_FOLDER_... files in the project.
+    4. Rewrites/replaces the old TOP_FOLDER_... file when directory contents change.
+    """
+    import hashlib
+
+    client = DanswerClient(danswer_url=mock_onyx_server, api_token="test-token")
+    root_str = os.path.abspath(str(tmp_path))
+    expected_hash = hashlib.md5(root_str.encode("utf-8")).hexdigest()
+    expected_project_name = f"workspace-{expected_hash}"
+
+    # Run 1: First initialization
+    ws_sync1 = WorkspaceProjectSync(workspace_root=root_str, client=client)
+    assert ws_sync1.project_name == expected_project_name
+
+    ws_sync1.initialize_project()
+    project_id_1 = ws_sync1.project_id
+    assert project_id_1 is not None
+
+    ws_sync1.executor.shutdown(wait=True)
+    ws_sync1.stop_background_watcher()
+
+    # Verify project files in mock server after Run 1
+    p_files_1 = client.get_project_files(project_id_1)
+    top_folder_files_1 = [f for f in p_files_1 if f.get("name", "").startswith("TOP_FOLDER_")]
+    assert len(top_folder_files_1) == 1
+
+    # Run 2: Second run on the same folder
+    ws_sync2 = WorkspaceProjectSync(workspace_root=root_str, client=client)
+    assert ws_sync2.project_name == expected_project_name
+
+    ws_sync2.initialize_project()
+    project_id_2 = ws_sync2.project_id
+    assert project_id_2 == project_id_1, "Repeat run in same dir should reuse same project_id"
+
+    ws_sync2.executor.shutdown(wait=True)
+    ws_sync2.stop_background_watcher()
+
+    # Verify project files in mock server after Run 2
+    p_files_2 = client.get_project_files(project_id_2)
+    top_folder_files_2 = [f for f in p_files_2 if f.get("name", "").startswith("TOP_FOLDER_")]
+    assert len(top_folder_files_2) == 1, "Should NOT create additional top_folder file"
+
+    # Modify workspace contents and trigger update_top_folder
+    new_file = tmp_path / "new_file.py"
+    new_file.write_text("print('new file')", encoding="utf-8")
+
+    ws_sync3 = WorkspaceProjectSync(workspace_root=root_str, client=client)
+    ws_sync3.initialize_project()
+    ws_sync3.update_top_folder()
+    ws_sync3.executor.shutdown(wait=True)
+    ws_sync3.stop_background_watcher()
+
+    p_files_3 = client.get_project_files(project_id_1)
+    top_folder_files_3 = [f for f in p_files_3 if f.get("name", "").startswith("TOP_FOLDER_")]
+    assert len(top_folder_files_3) == 1, "Rewriting top_folder should replace old file, keeping count at 1"
+
+
 def test_flask_routes_with_mock_onyx(mock_onyx_server, tmp_path):
     """
     Test Flask API route /v1/chat/completions with orchestrator initialized against mock_onyx_server.
