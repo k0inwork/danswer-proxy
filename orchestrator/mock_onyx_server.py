@@ -214,7 +214,29 @@ def send_chat_message():
     stream = data.get("stream", False)
     session_id = data.get("chat_session_id")
 
-    response_text = f"Mock Onyx answer to: {message}"
+    # Handle Mode Detector classifier call
+    if "[SYSTEM INSTRUCTION - MODE DETECTOR]" in message:
+        detector_reply = "CONTINUE|0|Mock mode classifier decision"
+        if stream:
+            def generate_detector_sse():
+                yield f"data: {json.dumps({'answer_piece': detector_reply})}\n\n"
+                yield "data: [DONE]\n\n"
+            return Response(generate_detector_sse(), mimetype="text/event-stream")
+        return jsonify({
+            "chat_session_id": session_id,
+            "answer": detector_reply,
+            "answer_citationless": detector_reply,
+        }), 200
+
+    # Clean user query if prompt wrappers are present
+    user_query = message
+    if "USER MESSAGE:" in message:
+        parts = message.split("USER MESSAGE:")
+        user_query = parts[-1].strip()
+    elif "--- USER MESSAGE FOR CLASSIFICATION ---" in message:
+        user_query = message.split("--- USER MESSAGE FOR CLASSIFICATION ---")[1].split("--- END USER MESSAGE ---")[0].strip()
+
+    response_text = f"Mock Onyx answer to: {user_query}"
 
     if stream:
         def generate_sse():
