@@ -53,3 +53,29 @@ def test_extract_complete_answer_error():
     with pytest.raises(RuntimeError) as exc_info:
         DanswerClient.extract_complete_answer(mock_resp)
     assert "Unauthorized" in str(exc_info.value)
+
+
+def test_create_chat_session_integer_project_id():
+    client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
+    client.session = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"chat_session_id": "sess-123"}
+    client.session.post.return_value = mock_resp
+
+    sid = client.create_chat_session(persona_id=0, project_id="63")
+    assert sid == "sess-123"
+
+    call_kwargs = client.session.post.call_args.kwargs
+    assert call_kwargs["json"]["project_id"] == 63
+
+
+def test_attach_file_to_project_failure_returns_false():
+    client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
+    client._safe_request = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    client._safe_request.return_value = mock_resp
+
+    result = client.attach_file_to_project(project_id="63", file_id="fid-abc")
+    assert result is False

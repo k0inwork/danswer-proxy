@@ -297,98 +297,118 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                 # Only pull descriptors that have reached READY state via on_attach_complete callback
                 file_descriptors = self.workspace_sync.get_ready_descriptors() if self.workspace_sync else []
 
-                response = self.client.send_message(
-                    session_id=active.session_id,
-                    message=current_message_to_send,
-                    stream=True,
-                    temperature=0.3,
-                    allowed_tool_ids=self.tool_ids,
-                    file_descriptors=file_descriptors,
-                    model=REAL_TALK_MODEL,
-                )
+                try:
+                    response = self.client.send_message(
+                        session_id=active.session_id,
+                        message=current_message_to_send,
+                        stream=True,
+                        temperature=0.3,
+                        allowed_tool_ids=self.tool_ids,
+                        file_descriptors=file_descriptors,
+                        model=REAL_TALK_MODEL,
+                    )
 
-                buffered_output = ""
-                intercepted_batch = False
-                streamed_anything = False
-                turn_chunks: List[str] = []
+                    buffered_output = ""
+                    intercepted_batch = False
+                    streamed_anything = False
+                    turn_chunks: List[str] = []
 
-                for chunk in self.client.iter_stream_text(response):
-                    buffered_output += chunk
-                    turn_chunks.append(chunk)
+                    for chunk in self.client.iter_stream_text(response):
+                        buffered_output += chunk
+                        turn_chunks.append(chunk)
 
-                    # Check for tool call intercept opportunity before streaming to client
-                    if "<local_tool>" in buffered_output and "</local_tool>" in buffered_output and not streamed_anything and self.workspace_sync and redispatch_count < max_redispatches:
-                        all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
-                        if all_tools:
-                            # Detect if any read/grounding tool is present in the invocation batch
-                            has_read_tool = False
-                            for t in all_tools:
-                                t_name = (t.get("name") or "").lower().strip()
-                                t_args = t.get("arguments") or {}
-                                t_fp = t_args.get("file_path") or t_args.get("path")
-                                if t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in {"list_dir", "ls", "dir", "grep_search", "grep", "search_code"}):
-                                    has_read_tool = True
-                                    break
-
-                            if has_read_tool:
-                                intercepted_batch = True
-                                logger.info("[AUTO-GROUNDING INTERCEPT] Intercepted batch of %d tool call(s) containing read/grounding tool.", len(all_tools))
-                                get_run_logger().log_tool_call(
-                                    tool_name="[AUTO_GROUNDING_BATCH]",
-                                    arguments={"tool_count": len(all_tools)},
-                                    result_summary="Intercepted read tools for blocking workspace sync",
-                                    intercepted=True,
-                                )
-
-                                attached_headers: List[str] = []
-                                tool_result_entries: List[str] = []
-
+                        # Check for tool call intercept opportunity before streaming to client
+                        if "<local_tool>" in buffered_output and "</local_tool>" in buffered_output and not streamed_anything and self.workspace_sync and redispatch_count < max_redispatches:
+                            all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
+                            if all_tools:
+                                # Detect if any read/grounding tool is present in the invocation batch
+                                has_read_tool = False
                                 for t in all_tools:
                                     t_name = (t.get("name") or "").lower().strip()
                                     t_args = t.get("arguments") or {}
                                     t_fp = t_args.get("file_path") or t_args.get("path")
-                                    is_read = t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in {"list_dir", "ls", "dir", "grep_search", "grep", "search_code"})
+                                    if t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in {"list_dir", "ls", "dir", "grep_search", "grep", "search_code"}):
+                                        has_read_tool = True
+                                        break
 
-                                    if is_read and t_fp:
-                                        logger.info("[AUTO-GROUNDING SYNC] Blocking sync for file: '%s'", t_fp)
-                                        desc = self.workspace_sync.upload_and_attach_blocking(t_fp)
-                                        canonical = desc.canonical_name if (desc and desc.canonical_name) else self.workspace_sync.canonical_name(t_fp, is_dir=False)
-                                        if desc and desc.status == DescriptorStatus.READY:
-                                            attached_headers.append(f"FILE {t_fp} was attached as {canonical}")
-                                            tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Attached and indexed in project context as {canonical}.")
+                                if has_read_tool:
+                                    intercepted_batch = True
+                                    logger.info("[AUTO-GROUNDING INTERCEPT] Intercepted batch of %d tool call(s) containing read/grounding tool.", len(all_tools))
+                                    get_run_logger().log_tool_call(
+                                        tool_name="[AUTO_GROUNDING_BATCH]",
+                                        arguments={"tool_count": len(all_tools)},
+                                        result_summary="Intercepted read tools for blocking workspace sync",
+                                        intercepted=True,
+                                    )
+
+                                    attached_headers: List[str] = []
+                                    tool_result_entries: List[str] = []
+
+                                    for t in all_tools:
+                                        t_name = (t.get("name") or "").lower().strip()
+                                        t_args = t.get("arguments") or {}
+                                        t_fp = t_args.get("file_path") or t_args.get("path")
+                                        is_read = t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in {"list_dir", "ls", "dir", "grep_search", "grep", "search_code"})
+
+                                        if is_read and t_fp:
+                                            logger.info("[AUTO-GROUNDING SYNC] Blocking sync for file: '%s'", t_fp)
+                                            desc = self.workspace_sync.upload_and_attach_blocking(t_fp)
+                                            canonical = desc.canonical_name if (desc and desc.canonical_name) else self.workspace_sync.canonical_name(t_fp, is_dir=False)
+                                            if desc and desc.status == DescriptorStatus.READY:
+                                                attached_headers.append(f"FILE {t_fp} was attached as {canonical}")
+                                                tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Attached and indexed in project context as {canonical}.")
+                                            else:
+                                                tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Failed to sync file to project.")
                                         else:
-                                            tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Failed to sync file to project.")
+                                            # Execute local non-read tool against workspace disk
+                                            res_output = self.workspace_sync.execute_local_non_read_tool(t.get("name", ""), t_args)
+                                            logger.info("[AUTO-GROUNDING LOCAL TOOL] Executed non-read tool '%s': %s", t.get("name"), res_output[:120])
+                                            tool_result_entries.append(f"- Tool '{t.get('name')}' output:\n{res_output}")
+
+                                    # Construct prompt with file attachments, real tool results, and original query
+                                    prompt_sections = []
+                                    if attached_headers:
+                                        prompt_sections.append("\n".join(attached_headers))
+                                    if tool_result_entries:
+                                        prompt_sections.append("[LOCAL TOOL EXECUTION RESULTS]:\n" + "\n\n".join(tool_result_entries))
+                                    prompt_sections.append(f"[ORIGINAL REQUEST]:\n{message_for_persona}")
+
+                                    current_message_to_send = "\n\n".join(prompt_sections)
+                                    redispatch_count += 1
+                                    break
+
+                        # If we might be receiving a tool call, buffer chunks without yielding until </local_tool> or non-tool text
+                        is_tool_call_prefix = (len(buffered_output) < 12 and "<local_tool>".startswith(buffered_output)) or ("<local_tool>" in buffered_output)
+                        if not streamed_anything and is_tool_call_prefix and "</local_tool>" not in buffered_output and self.workspace_sync and redispatch_count < max_redispatches:
+                            continue
+
+                        for c in turn_chunks:
+                            yield c
+                        turn_chunks = []
+                        streamed_anything = True
+
+                    if not intercepted_batch:
+                        chunks.extend(turn_chunks)
+                        break
+
+                except Exception as inner_exc:
+                    exc_str = str(inner_exc)
+                    if "not associated with project" in exc_str and self.workspace_sync and redispatch_count < max_redispatches:
+                        logger.warning("Detected unassociated file error from Onyx: %s. Re-attaching and retrying...", inner_exc)
+                        import re
+                        file_ids = re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", exc_str, re.I)
+                        for fid in file_ids:
+                            for cname, desc in list(self.workspace_sync.descriptors.items()):
+                                if desc.file_id == fid:
+                                    if desc.project_id:
+                                        attached = self.client.attach_file_to_project(desc.project_id, fid)
+                                        if not attached:
+                                            desc.status = DescriptorStatus.FAILED
                                     else:
-                                        # Execute local non-read tool against workspace disk
-                                        res_output = self.workspace_sync.execute_local_non_read_tool(t.get("name", ""), t_args)
-                                        logger.info("[AUTO-GROUNDING LOCAL TOOL] Executed non-read tool '%s': %s", t.get("name"), res_output[:120])
-                                        tool_result_entries.append(f"- Tool '{t.get('name')}' output:\n{res_output}")
-
-                                # Construct prompt with file attachments, real tool results, and original query
-                                prompt_sections = []
-                                if attached_headers:
-                                    prompt_sections.append("\n".join(attached_headers))
-                                if tool_result_entries:
-                                    prompt_sections.append("[LOCAL TOOL EXECUTION RESULTS]:\n" + "\n\n".join(tool_result_entries))
-                                prompt_sections.append(f"[ORIGINAL REQUEST]:\n{message_for_persona}")
-
-                                current_message_to_send = "\n\n".join(prompt_sections)
-                                redispatch_count += 1
-                                break
-
-                    # If we might be receiving a tool call, buffer chunks without yielding until </local_tool> or non-tool text
-                    is_tool_call_prefix = (len(buffered_output) < 12 and "<local_tool>".startswith(buffered_output)) or ("<local_tool>" in buffered_output)
-                    if not streamed_anything and is_tool_call_prefix and "</local_tool>" not in buffered_output and self.workspace_sync and redispatch_count < max_redispatches:
+                                        desc.status = DescriptorStatus.FAILED
+                        redispatch_count += 1
                         continue
-
-                    for c in turn_chunks:
-                        yield c
-                    turn_chunks = []
-                    streamed_anything = True
-
-                if not intercepted_batch:
-                    chunks.extend(turn_chunks)
-                    break
+                    raise inner_exc
 
         except Exception as exc:
             logger.error("Streaming message invocation failed: %s", exc)
