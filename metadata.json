@@ -1,6 +1,6 @@
 {
   "name": "Danswer Onyx Orchestrator v4",
-  "description": "Fast and clean Python files tree viewer and ZIP downloader for the refactored Onyx Orchestrator codebase.",
+  "description": "Python Onyx Orchestrator server and proxy for Danswer.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
