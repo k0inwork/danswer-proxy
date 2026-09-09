@@ -22,9 +22,8 @@ class WorkspaceProjectSync:
         self.root = os.path.abspath(workspace_root)
         self.client = client
 
-        folder_name = os.path.basename(self.root) or "root"
-        path_hash = hashlib.md5(self.root.encode("utf-8")).hexdigest()[:8]
-        self.project_name = f"Workspace-{folder_name}-{path_hash}"
+        path_hash = hashlib.md5(self.root.encode("utf-8")).hexdigest()
+        self.project_name = f"workspace-{path_hash}"
         self.cache_file = os.path.join(self.root, "workspace_sync_cache.json")
 
         self.project_id: Optional[str] = None
