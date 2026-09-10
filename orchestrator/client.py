@@ -142,6 +142,17 @@ class DanswerClient:
 
                 logger.info("Attachment candidate endpoint %s returned HTTP %s: %s", ep, res.status_code, res.text[:200])
                 if res.status_code in (200, 201, 204):
+                    try:
+                        res_json = res.json()
+                        if isinstance(res_json, dict):
+                            # If single file endpoint returned an object where project_id is explicitly None,
+                            # endpoint did NOT actually associate the file with the project.
+                            if res_json.get("project_id") is None and "file_ids" not in res_json:
+                                logger.warning("Endpoint %s returned HTTP %s but project_id is null in response body.", ep, res.status_code)
+                                continue
+                    except Exception:
+                        pass
+
                     get_run_logger().log_action(
                         category="FILE_ATTACH",
                         action="SUCCESS",
@@ -151,6 +162,16 @@ class DanswerClient:
             except Exception as exc:
                 logger.debug("Failed endpoint %s: %s", ep, exc)
                 continue
+
+        # Fallback check: Verify if fid is present in project files
+        try:
+            p_files = self.get_project_files(pid_str)
+            for f in p_files:
+                if isinstance(f, dict):
+                    if str(f.get("file_id") or f.get("id")) == fid or str(f.get("id") or f.get("file_id")) == fid:
+                        return True
+        except Exception:
+            pass
 
         logger.warning("Could not attach file_id=%s to project_id=%s across candidate endpoints.", fid, pid_str)
         get_run_logger().log_action(
@@ -313,6 +334,7 @@ class DanswerClient:
             "project_id": pid_val if pid_val else "",
             "temp_id_map": "{}",
         }
+        params = {"project_id": pid_val} if pid_val else {}
 
         try:
             response = self._safe_request(
@@ -320,25 +342,30 @@ class DanswerClient:
                 url,
                 files=files,
                 data=data,
+                params=params,
                 timeout=API_TIMEOUT,
             )
 
             if response.status_code == 422 and pid_str.isdigit():
                 data["project_id"] = int(pid_str)
+                params["project_id"] = int(pid_str)
                 response = self._safe_request(
                     "POST",
                     url,
                     files={"files": (upload_name, content_bytes, "text/plain")},
                     data=data,
+                    params=params,
                     timeout=API_TIMEOUT,
                 )
             elif response.status_code == 422 and isinstance(pid_val, int):
                 data["project_id"] = str(pid_val)
+                params["project_id"] = str(pid_val)
                 response = self._safe_request(
                     "POST",
                     url,
                     files={"files": (upload_name, content_bytes, "text/plain")},
                     data=data,
+                    params=params,
                     timeout=API_TIMEOUT,
                 )
 
