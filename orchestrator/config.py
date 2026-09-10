@@ -65,7 +65,7 @@ MODEL_ALIASES = {
     "sonnet": "claude-sonnet-4.6",
     "claude": "claude-sonnet-4.6",
     "claude-sonnet": "claude-sonnet-4.6",
-    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-4.6": "claude-sonnet-4.6",
     "sonnet-4.6": "claude-sonnet-4.6",
     "gpt": "gpt-5.4-nano",
     "gpt-5.4": "gpt-5.4-nano",
