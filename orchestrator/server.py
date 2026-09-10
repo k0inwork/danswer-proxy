@@ -24,6 +24,7 @@ from orchestrator.config import (
     init_run_logger,
     log_incoming_request,
     logger,
+    resolve_model_key,
 )
 from orchestrator.core import Orchestrator
 from orchestrator.matrix_manager import MatrixManager
@@ -82,6 +83,12 @@ def chat_completions():
         or data.get("conversation_id")
         or "mvp-single-conversation"
     )
+
+    req_model = data.get("model")
+    if req_model and isinstance(req_model, str):
+        resolved_req_model = resolve_model_key(req_model)
+        if resolved_req_model:
+            orchestrator.set_active_model(conversation_id, resolved_req_model)
 
     stream_requested = data.get("stream", True)
     completion_id = f"chatcmpl-{uuid4().hex}"
@@ -314,6 +321,10 @@ def list_models():
         "gpt-4",
         "gpt-4o",
         "gpt-4o-mini",
+        "glm",
+        "glm-4",
+        "sonnet",
+        "claude-sonnet",
         "claude-3-5-sonnet-20241022",
         "claude-3-7-sonnet-20250219",
         "claude-3-opus-20240229",
