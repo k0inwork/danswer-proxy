@@ -316,31 +316,6 @@ def list_models():
             "parent": None,
         })
 
-    common_aliases = [
-        "any",
-        "gpt-4",
-        "gpt-4o",
-        "gpt-4o-mini",
-        "glm",
-        "glm-4",
-        "sonnet",
-        "claude-sonnet",
-        "claude-3-5-sonnet-20241022",
-        "claude-3-7-sonnet-20250219",
-        "claude-3-opus-20240229",
-    ]
-    for alias in common_aliases:
-        if alias not in MODELS:
-            model_entries.append({
-                "id": alias,
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": "danswer-orchestrator",
-                "permission": [],
-                "root": alias,
-                "parent": None,
-            })
-
     return Response(
         json.dumps({"object": "list", "data": model_entries}, ensure_ascii=False),
         mimetype="application/json",

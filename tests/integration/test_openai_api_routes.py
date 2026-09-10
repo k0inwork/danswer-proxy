@@ -38,6 +38,12 @@ def test_health_handler():
 def test_list_models_handler():
     res = server_mod.list_models()
     assert res is not None
+    data = json.loads(res.get_data(as_text=True))
+    model_ids = [m["id"] for m in data["data"]]
+    assert "claude-sonnet-4.6" in model_ids
+    assert "glm-4" in model_ids
+    assert "gpt-4" not in model_ids
+    assert "claude-3-opus-20240229" not in model_ids
 
 
 def test_chat_completions_handler_uninitialized():
