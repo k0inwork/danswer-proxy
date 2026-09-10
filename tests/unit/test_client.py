@@ -100,3 +100,41 @@ def test_attach_file_to_project_failure_returns_false():
 
     result = client.attach_file_to_project(project_id="63", file_id="fid-abc")
     assert result is False
+
+
+def test_attach_file_to_project_skips_null_project_id_response():
+    client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
+    client._safe_request = MagicMock()
+
+    # Candidate 1 & 2 return HTTP 200 with project_id = None
+    null_proj_resp = MagicMock()
+    null_proj_resp.status_code = 200
+    null_proj_resp.json.return_value = {"id": "user-file-uuid", "file_id": "proj-file-uuid", "project_id": None}
+
+    client._safe_request.return_value = null_proj_resp
+    client.get_project_files = MagicMock(return_value=[])
+
+    result = client.attach_file_to_project(project_id="63", file_id="proj-file-uuid")
+    assert result is False
+
+
+def test_upload_project_file_returns_distinct_file_id():
+    client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
+    client._safe_request = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "user_files": [
+            {
+                "id": "user-file-id-123",
+                "file_id": "project-file-id-456",
+                "name": "TOP_FOLDER_test.txt",
+                "project_id": None,
+            }
+        ]
+    }
+    client._safe_request.return_value = mock_resp
+
+    ret = client.upload_project_file(project_id=63, filename="TOP_FOLDER_test.txt", content_bytes=b"test")
+    assert ret.get("id") == "user-file-id-123"
+    assert ret.get("file_id") == "project-file-id-456"
