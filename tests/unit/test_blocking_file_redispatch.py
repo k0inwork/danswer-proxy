@@ -197,6 +197,43 @@ class TestBlockingFileSyncAndRedispatch(unittest.TestCase):
             full_output = "".join(chunks)
             self.assertIn(grounded_answer, full_output)
 
+    def test_format_external_tools_default_injection(self):
+        """
+        Verify that format_external_tools_for_danswer always includes local tool instructions
+        and default filesystem tools (read_file, list_dir, grep_search, write_file) even if tools list is empty.
+        """
+        orchestrator = Orchestrator(
+            client=self.mock_client,
+            routing_manifest="Test manifest",
+            tool_ids=[1, 2],
+            workspace_sync=self.sync,
+        )
+
+        # Test with empty tools list
+        formatted_empty = orchestrator.format_external_tools_for_danswer([])
+        self.assertIn("[SYSTEM INSTRUCTION: LOCAL TOOL EXECUTION INTERFACE]", formatted_empty)
+        self.assertIn("- Tool: read_file", formatted_empty)
+        self.assertIn("- Tool: list_dir", formatted_empty)
+        self.assertIn("- Tool: grep_search", formatted_empty)
+        self.assertIn("- Tool: write_file", formatted_empty)
+
+        # Test with None
+        formatted_none = orchestrator.format_external_tools_for_danswer(None)
+        self.assertIn("[SYSTEM INSTRUCTION: LOCAL TOOL EXECUTION INTERFACE]", formatted_none)
+        self.assertIn("- Tool: read_file", formatted_none)
+
+        # Test with external custom tool
+        custom_tools = [{
+            "function": {
+                "name": "custom_analysis_tool",
+                "description": "Custom external analyzer",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+            }
+        }]
+        formatted_custom = orchestrator.format_external_tools_for_danswer(custom_tools)
+        self.assertIn("- Tool: read_file", formatted_custom)
+        self.assertIn("- Tool: custom_analysis_tool", formatted_custom)
+
     def test_intercept_tool_call_with_preamble_buffering(self):
         """
         Verify that when LLM output includes conversational preamble text before <local_tool>,

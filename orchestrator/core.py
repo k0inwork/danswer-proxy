@@ -30,23 +30,28 @@ class Orchestrator:
     def format_external_tools_for_danswer(
         self, tools: Optional[List[dict]], workspace_sync: Optional[Any] = None
     ) -> str:
-        if not tools:
-            return ""
-
         sync = workspace_sync or getattr(self, "workspace_sync", None)
         cwd = sync.root if (sync and hasattr(sync, "root")) else os.getcwd()
-        lines = []
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            fn = tool.get("function", tool)
-            if isinstance(fn, dict) and fn.get("name"):
-                desc = fn.get("description", "")
-                params = json.dumps(fn.get("parameters", {}))
-                lines.append(f"- Tool: {fn['name']}\n  Description: {desc}\n  Parameters schema: {params}")
 
-        if not lines:
-            return ""
+        lines = [
+            "- Tool: read_file\n  Description: Reads a file from the local filesystem.\n  Parameters schema: {\"type\": \"object\", \"properties\": {\"file_path\": {\"type\": \"string\"}}, \"required\": [\"file_path\"]}",
+            "- Tool: list_dir\n  Description: Lists files and subdirectories in a workspace path.\n  Parameters schema: {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}",
+            "- Tool: grep_search\n  Description: Searches for text or regex patterns in workspace files.\n  Parameters schema: {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"path\": {\"type\": \"string\"}}, \"required\": [\"query\"]}",
+            "- Tool: write_file\n  Description: Writes or overwrites a workspace file.\n  Parameters schema: {\"type\": \"object\", \"properties\": {\"file_path\": {\"type\": \"string\"}, \"content\": {\"type\": \"string\"}}, \"required\": [\"file_path\", \"content\"]}",
+        ]
+
+        if tools:
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                fn = tool.get("function", tool)
+                if isinstance(fn, dict) and fn.get("name"):
+                    name = fn["name"]
+                    if name in {"read_file", "list_dir", "grep_search", "write_file"}:
+                        continue
+                    desc = fn.get("description", "")
+                    params = json.dumps(fn.get("parameters", {}))
+                    lines.append(f"- Tool: {name}\n  Description: {desc}\n  Parameters schema: {params}")
 
         return (
             "\n\n[SYSTEM INSTRUCTION: LOCAL TOOL EXECUTION INTERFACE]\n"
