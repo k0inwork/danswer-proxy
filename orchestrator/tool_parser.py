@@ -250,7 +250,10 @@ def extract_last_tool_execution_context(
             fn_name = (fn_info.get("name") or "").lower()
             fn_args_str = fn_info.get("arguments") or ""
 
+            from orchestrator.config import get_run_logger
+
             file_path = None
+            parsed_args = {}
             if isinstance(fn_args_str, str) and fn_args_str:
                 try:
                     parsed_args = json.loads(fn_args_str)
@@ -260,6 +263,14 @@ def extract_last_tool_execution_context(
                     fp_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', fn_args_str)
                     if fp_match:
                         file_path = fp_match.group(1)
+                    parsed_args = {"_raw": fn_args_str}
+
+            get_run_logger().log_tool_call(
+                tool_name=fn_name or tool_id,
+                arguments=parsed_args if isinstance(parsed_args, dict) else {"args": parsed_args},
+                result_summary=content[:300],
+                intercepted=False,
+            )
 
             if workspace_sync and (fn_name in {"read", "view", "read_file"} or file_path):
                 if not file_path:

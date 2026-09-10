@@ -153,6 +153,12 @@ def chat_completions():
                 openai_tool_calls = []
                 clean_content = full_text
                 for idx, inv in enumerate(tool_invocations):
+                    get_run_logger().log_tool_call(
+                        tool_name=inv["name"],
+                        arguments=inv["arguments"],
+                        result_summary="Converted XML tool call to OpenAI format",
+                        intercepted=False,
+                    )
                     openai_tool_calls.append({
                         "index": idx,
                         "id": f"call_{uuid4().hex[:8]}",
@@ -227,6 +233,21 @@ def chat_completions():
 
                 for tool_call in tool_calls:
                     tool_calls_emitted = True
+                    fn_info = tool_call.get("function", {})
+                    fn_name = fn_info.get("name", "")
+                    fn_args_str = fn_info.get("arguments", "{}")
+                    try:
+                        fn_args = json.loads(fn_args_str) if isinstance(fn_args_str, str) else fn_args_str
+                    except Exception:
+                        fn_args = {"_raw": fn_args_str}
+
+                    get_run_logger().log_tool_call(
+                        tool_name=fn_name,
+                        arguments=fn_args if isinstance(fn_args, dict) else {"args": fn_args},
+                        result_summary="Converted XML tool call to OpenAI format",
+                        intercepted=False,
+                    )
+
                     chunk_msg = make_completion_chunk(
                         completion_id=completion_id,
                         role="assistant" if first_chunk else None,
