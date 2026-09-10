@@ -93,7 +93,21 @@ def test_clean_user_message():
     assert cleaned == "Please explain this code."
 
 
-def test_extract_last_tool_execution_context():
+def test_extract_last_tool_execution_context(monkeypatch):
+    logged_tool_calls = []
+    from orchestrator.config import get_run_logger
+    run_logger = get_run_logger()
+    monkeypatch.setattr(
+        run_logger,
+        "log_tool_call",
+        lambda tool_name, arguments, result_summary=None, intercepted=False: logged_tool_calls.append({
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "result_summary": result_summary,
+            "intercepted": intercepted,
+        })
+    )
+
     messages = [
         {"role": "user", "content": "Check files"},
         {
@@ -110,3 +124,6 @@ def test_extract_last_tool_execution_context():
     assert "=== MOST RECENT TOOL EXECUTION RESULTS ===" in ctx
     assert "call_123" in ctx
     assert "file contents here" in ctx
+    assert len(logged_tool_calls) == 1
+    assert logged_tool_calls[0]["tool_name"] == "read_file"
+    assert logged_tool_calls[0]["arguments"] == {"file_path": "test.txt"}

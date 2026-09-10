@@ -28,23 +28,28 @@ class Orchestrator:
     def format_external_tools_for_danswer(
         self, tools: Optional[List[dict]], workspace_sync: Optional[Any] = None
     ) -> str:
-        if not tools:
-            return ""
-
         sync = workspace_sync or getattr(self, "workspace_sync", None)
         cwd = sync.root if (sync and hasattr(sync, "root")) else os.getcwd()
-        lines = []
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            fn = tool.get("function", tool)
-            if isinstance(fn, dict) and fn.get("name"):
-                desc = fn.get("description", "")
-                params = json.dumps(fn.get("parameters", {}))
-                lines.append(f"- Tool: {fn['name']}\n  Description: {desc}\n  Parameters schema: {params}")
 
-        if not lines:
-            return ""
+        lines = [
+            "- Tool: read_file\n  Description: Reads a file from the local filesystem.\n  Parameters schema: {\"type\": \"object\", \"properties\": {\"file_path\": {\"type\": \"string\"}}, \"required\": [\"file_path\"]}",
+            "- Tool: list_dir\n  Description: Lists files and subdirectories in a workspace path.\n  Parameters schema: {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}",
+            "- Tool: grep_search\n  Description: Searches for text or regex patterns in workspace files.\n  Parameters schema: {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"path\": {\"type\": \"string\"}}, \"required\": [\"query\"]}",
+            "- Tool: write_file\n  Description: Writes or overwrites a workspace file.\n  Parameters schema: {\"type\": \"object\", \"properties\": {\"file_path\": {\"type\": \"string\"}, \"content\": {\"type\": \"string\"}}, \"required\": [\"file_path\", \"content\"]}",
+        ]
+
+        if tools:
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                fn = tool.get("function", tool)
+                if isinstance(fn, dict) and fn.get("name"):
+                    name = fn["name"]
+                    if name in {"read_file", "list_dir", "grep_search", "write_file"}:
+                        continue
+                    desc = fn.get("description", "")
+                    params = json.dumps(fn.get("parameters", {}))
+                    lines.append(f"- Tool: {name}\n  Description: {desc}\n  Parameters schema: {params}")
 
         return (
             "\n\n[SYSTEM INSTRUCTION: LOCAL TOOL EXECUTION INTERFACE]\n"
@@ -357,8 +362,20 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                             if desc and desc.status == DescriptorStatus.READY:
                                                 attached_headers.append(f"FILE {t_fp} was attached as {canonical}")
                                                 tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Attached and indexed in project context as {canonical}.")
+                                                get_run_logger().log_tool_call(
+                                                    tool_name=t_name,
+                                                    arguments=t_args,
+                                                    result_summary=f"Intercepted for blocking workspace sync: {canonical}",
+                                                    intercepted=True,
+                                                )
                                             else:
                                                 tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Failed to sync file to project.")
+                                                get_run_logger().log_tool_call(
+                                                    tool_name=t_name,
+                                                    arguments=t_args,
+                                                    result_summary=f"Failed blocking sync for file: {t_fp}",
+                                                    intercepted=True,
+                                                )
                                         else:
                                             # Execute local non-read tool against workspace disk
                                             res_output = self.workspace_sync.execute_local_non_read_tool(t.get("name", ""), t_args)
@@ -377,10 +394,12 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                     redispatch_count += 1
                                     break
 
-                        # If we might be receiving a tool call, buffer chunks without yielding until </local_tool> or non-tool text
-                        is_tool_call_prefix = (len(buffered_output) < 12 and "<local_tool>".startswith(buffered_output)) or ("<local_tool>" in buffered_output)
-                        if not streamed_anything and is_tool_call_prefix and "</local_tool>" not in buffered_output and self.workspace_sync and redispatch_count < max_redispatches:
-                            continue
+                        # Buffer stream chunks while checking if a tool call tag is being streamed or if a brief preamble is present (< 120 chars)
+                        if not streamed_anything and self.workspace_sync and redispatch_count < max_redispatches:
+                            in_uncompleted_tool = "<local_tool>" in buffered_output and "</local_tool>" not in buffered_output
+                            no_tool_yet_short_buffer = "<local_tool>" not in buffered_output and len(buffered_output) < 120
+                            if in_uncompleted_tool or no_tool_yet_short_buffer:
+                                continue
 
                         for c in turn_chunks:
                             yield c
@@ -388,6 +407,9 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         streamed_anything = True
 
                     if not intercepted_batch:
+                        if not streamed_anything:
+                            for c in turn_chunks:
+                                yield c
                         chunks.extend(turn_chunks)
                         break
 
