@@ -55,7 +55,7 @@ class Orchestrator:
             "2. DO NOT output fake ls output, fake directory trees, or imaginary code blocks before the tool executes.\n"
             "3. Emit the <local_tool> tag IMMEDIATELY with at most a brief 1-sentence explanation.\n"
             "4. STOP generating immediately after </local_tool>. You will receive the real execution results on the next turn to provide your full answer.\n"
-            "5. For file paths, use relative paths (e.g. 'app5.py') or paths rooted in CURRENT LOCAL WORKING DIRECTORY.\n"
+            "5. For file paths, use relative paths (e.g. 'app.py') or paths rooted in CURRENT LOCAL WORKING DIRECTORY.\n"
             "6. Do NOT output <local_tool> tags or example templates in your final answer when no tool execution is required.\n\n"
             "TOOL INVOCATION XML SYNTAX:\n"
             "<local_tool>\n"

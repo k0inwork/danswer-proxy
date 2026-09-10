@@ -68,6 +68,7 @@ def test_streaming_xml_tool_parser_single_chunk():
     text_chunks, tool_calls = parser.feed(chunk)
     assert "Hello! " in text_chunks
     assert len(tool_calls) == 1
+    assert tool_calls[0]["index"] == 0
     assert tool_calls[0]["function"]["name"] == "list_dir"
 
 
@@ -82,6 +83,7 @@ def test_streaming_xml_tool_parser_chunked_stream():
     # Part 2: rest of tool call
     t2, c2 = parser.feed('tool><name>read_file</name><arguments>{"file_path": "a.py"}</arguments></local_tool> done')
     assert len(c2) == 1
+    assert c2[0]["index"] == 0
     assert c2[0]["function"]["name"] == "read_file"
 
 

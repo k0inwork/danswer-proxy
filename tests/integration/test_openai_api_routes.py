@@ -69,6 +69,8 @@ def test_chat_completions_non_streaming_multi_tool():
             assert "choices" in data
             msg = data["choices"][0]["message"]
             assert len(msg["tool_calls"]) == 2
+            assert msg["tool_calls"][0]["index"] == 0
             assert msg["tool_calls"][0]["function"]["name"] == "read_file"
+            assert msg["tool_calls"][1]["index"] == 1
             assert msg["tool_calls"][1]["function"]["name"] == "read_file"
             assert data["choices"][0]["finish_reason"] == "tool_calls"
