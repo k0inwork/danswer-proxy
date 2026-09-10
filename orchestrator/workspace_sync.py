@@ -803,7 +803,7 @@ class WorkspaceProjectSync:
             "OPERATIONAL RULES FOR MODEL:",
             "1. When asked about project structure or file locations, consult the `TOP_FOLDER_...` attached document if present.",
             "2. If a local file or subdirectory is already attached as a project document descriptor (e.g. starting with `FILE_` or `FOLDER_`), refer to and read it directly from your attached context/documents. Do NOT call local filesystem tools or make redundant read requests for files already present in your context.",
-            "3. If a file or directory is NOT already attached to your context, use the provided local filesystem tools (such as `Read`, `Glob`, `Grep`, etc.) to inspect, read, or list them. Do NOT use internet search, web-fetch, or web URL tools to read local files or list directories.",
+            "3. If a file or directory is NOT already attached to your context, emit the appropriate `<local_tool>` tag (e.g. `read_file`, `list_dir`, `grep_search`) immediately to inspect or read it. Do NOT refuse or state that you lack file access.",
             "4. All attached documents represent live, real-time code from the user's workspace.",
             "5. Do NOT state that you lack file access or spawn subagents to re-read files that are already attached in your descriptors.",
             "</workspace_context>\n"
