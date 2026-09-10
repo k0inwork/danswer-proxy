@@ -302,6 +302,7 @@ def chat_completions():
 
 
 @app.route("/v1/models", methods=["GET"])
+@app.route("/api/models", methods=["GET"])
 def list_models():
     model_entries = []
 
