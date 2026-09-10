@@ -140,7 +140,7 @@ def test_upload_project_file_returns_distinct_file_id():
     assert ret.get("file_id") == "project-file-id-456"
 
 
-def test_delete_project_file_candidate_endpoints():
+def test_delete_project_file():
     client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
     client._safe_request = MagicMock()
     mock_resp = MagicMock()
@@ -148,4 +148,4 @@ def test_delete_project_file_candidate_endpoints():
     client._safe_request.return_value = mock_resp
 
     client.delete_project_file(file_id="fid-dup-1", project_id="63")
-    assert client._safe_request.call_count >= 2
+    assert client._safe_request.call_count == 2

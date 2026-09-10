@@ -292,7 +292,7 @@ class DanswerClient:
         return {"id": name, "name": name}
 
     def delete_project_file(self, file_id: str, project_id: str = "") -> None:
-        """Delete an existing Onyx project file by its file ID across candidate endpoints."""
+        """Delete an existing Onyx project file by its file ID."""
         fid = (file_id or "").strip()
         pid = (project_id or "").strip()
         if not fid:
@@ -300,14 +300,9 @@ class DanswerClient:
 
         urls = [
             f"{self.danswer_url}/api/user/projects/file/{fid}",
-            f"{self.danswer_url}/api/user/projects/files/{fid}",
         ]
         if pid:
-            urls.extend([
-                f"{self.danswer_url}/api/user/projects/{pid}/files/{fid}",
-                f"{self.danswer_url}/api/user/projects/{pid}/file/{fid}",
-            ])
-        urls.append(f"{self.danswer_url}/api/user/files/{fid}")
+            urls.append(f"{self.danswer_url}/api/user/projects/{pid}/files/{fid}")
 
         for url in urls:
             try:
