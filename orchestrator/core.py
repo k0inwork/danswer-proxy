@@ -394,28 +394,25 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                 except Exception as inner_exc:
                     exc_str = str(inner_exc)
                     if "not associated with project" in exc_str and self.workspace_sync and redispatch_count < max_redispatches:
-                        logger.warning("Detected unassociated file error from Onyx: %s. Attempting re-attachment / invalidation...", inner_exc)
+                        logger.warning("Detected unassociated file error from Onyx: %s. Invalidating stale descriptor(s) and re-uploading...", inner_exc)
                         import re
                         file_ids = re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", exc_str, re.I)
                         for fid in file_ids:
                             for cname, desc in list(self.workspace_sync.descriptors.items()):
                                 if desc.file_id == fid:
-                                    logger.info("Attempting to re-attach unassociated file descriptor '%s' (file_id=%s) to project %s", cname, fid, desc.project_id)
-                                    reattached = False
-                                    if desc.project_id:
-                                        try:
-                                            reattached = self.client.attach_file_to_project(desc.project_id, fid)
-                                        except Exception as reattach_err:
-                                            logger.warning("Re-attach attempt failed for '%s': %s", cname, reattach_err)
-                                    if reattached:
-                                        logger.info("Re-attached unassociated file '%s' (file_id=%s) successfully.", cname, fid)
-                                        desc.status = DescriptorStatus.READY
-                                    else:
-                                        logger.info("Invalidating unassociated file descriptor '%s' (file_id=%s)", cname, fid)
-                                        desc.status = DescriptorStatus.FAILED
-                                        desc.file_id = None
-                                        if cname in self.workspace_sync.file_hashes:
-                                            del self.workspace_sync.file_hashes[cname]
+                                    logger.info("Invalidating unassociated file descriptor '%s' (file_id=%s)", cname, fid)
+                                    desc.status = DescriptorStatus.FAILED
+                                    desc.file_id = None
+                                    if cname in self.workspace_sync.file_hashes:
+                                        del self.workspace_sync.file_hashes[cname]
+
+                                    fpath = desc.file_path or (cname.replace("TOP_FOLDER_", "").replace(".txt", "") if cname.startswith("TOP_FOLDER") else "")
+                                    if cname.startswith("TOP_FOLDER"):
+                                        logger.info("Re-synchronizing top folder map for descriptor '%s'", cname)
+                                        self.workspace_sync.update_top_folder()
+                                    elif fpath:
+                                        logger.info("Re-uploading and attaching unassociated file '%s' (path=%s)", cname, fpath)
+                                        self.workspace_sync.upload_and_attach_blocking(fpath)
                         redispatch_count += 1
                         continue
                     raise inner_exc
