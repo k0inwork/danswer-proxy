@@ -334,6 +334,26 @@ class TestFileUploadAndRAGFlow(unittest.TestCase):
         # Verify write_workspace_file was called exactly once
         mock_write.assert_called_once_with("test.txt", "hello world")
 
+    def test_step8_upload_and_attach_distinct_file_id_and_id(self):
+        """
+        Verify that upload_and_attach_blocking selects file_id when upload response
+        contains distinct id and file_id fields.
+        """
+        file_path = "src/distinct.py"
+        canonical = self.sync.canonical_name(file_path, is_dir=False)
+
+        self.mock_client.upload_project_file.return_value = {
+            "id": "user-file-uuid-111",
+            "file_id": "project-file-uuid-222",
+            "file_type": "plain_text",
+            "name": canonical,
+        }
+
+        desc = self.sync.upload_and_attach_blocking(file_path=file_path, content="print('distinct')")
+        self.assertIsNotNone(desc)
+        self.assertEqual(desc.file_id, "project-file-uuid-222")
+        self.assertEqual(desc.status, DescriptorStatus.READY)
+
 
 if __name__ == "__main__":
     unittest.main()
