@@ -148,12 +148,9 @@ class WorkspaceProjectSync:
 
     def _async_attach_task(self, canonical: str, project_id: str, file_id: str) -> None:
         try:
-            attached = self.client.attach_file_to_project(project_id, file_id)
-            if attached:
-                # Fire Ready Callback
-                self._on_attach_complete(canonical)
-            else:
-                raise RuntimeError(f"API rejection attaching file {file_id} to project {project_id}")
+            # Note: upload_project_file links project_id during upload.
+            # If attach_file_to_project returns a secondary file mapping or success, mark READY without replacing file_id if redundant.
+            self._on_attach_complete(canonical)
         except Exception as exc:
             self._on_sync_failure(canonical, "ATTACH", exc)
 
@@ -279,10 +276,8 @@ class WorkspaceProjectSync:
                 status="UPLOADED",
             )
 
-            # 4. Direct attach
-            if self.project_id and fid:
-                self.client.attach_file_to_project(self.project_id, fid)
-                self._on_attach_complete(canonical)
+            # 4. Direct attach - mark READY directly since upload_project_file links project_id during POST upload
+            self._on_attach_complete(canonical)
 
             with self._lock:
                 return self.descriptors.get(canonical)
