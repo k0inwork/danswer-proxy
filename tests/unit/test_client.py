@@ -139,6 +139,10 @@ def test_upload_project_file_returns_distinct_file_id():
     assert ret.get("id") == "user-file-id-123"
     assert ret.get("file_id") == "project-file-id-456"
 
+    # Verify query params passed to request
+    call_kwargs = client._safe_request.call_args[1]
+    assert call_kwargs["params"] == {"project_id": 63}
+
 
 def test_delete_project_file():
     client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")

@@ -334,6 +334,7 @@ class DanswerClient:
             "project_id": pid_val if pid_val else "",
             "temp_id_map": "{}",
         }
+        params = {"project_id": pid_val} if pid_val else {}
 
         try:
             response = self._safe_request(
@@ -341,25 +342,30 @@ class DanswerClient:
                 url,
                 files=files,
                 data=data,
+                params=params,
                 timeout=API_TIMEOUT,
             )
 
             if response.status_code == 422 and pid_str.isdigit():
                 data["project_id"] = int(pid_str)
+                params["project_id"] = int(pid_str)
                 response = self._safe_request(
                     "POST",
                     url,
                     files={"files": (upload_name, content_bytes, "text/plain")},
                     data=data,
+                    params=params,
                     timeout=API_TIMEOUT,
                 )
             elif response.status_code == 422 and isinstance(pid_val, int):
                 data["project_id"] = str(pid_val)
+                params["project_id"] = str(pid_val)
                 response = self._safe_request(
                     "POST",
                     url,
                     files={"files": (upload_name, content_bytes, "text/plain")},
                     data=data,
+                    params=params,
                     timeout=API_TIMEOUT,
                 )
 
@@ -392,7 +398,7 @@ class DanswerClient:
             get_run_logger().log_file_upload(
                 file_path=filename,
                 canonical_name=upload_name,
-                file_id=str(ret_dict.get("file_id") or ret_dict.get("id") or ""),
+                file_id=str(ret_dict.get("id") or ret_dict.get("file_id") or ""),
                 project_id=pid_str,
                 status="UPLOADED",
             )
