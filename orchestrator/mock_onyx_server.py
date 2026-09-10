@@ -164,19 +164,30 @@ def upload_project_file():
 
 
 @app.route("/api/user/projects/<project_id>/files/<file_id>", methods=["POST"])
-def attach_file_to_project(project_id: str, file_id: str):
-    """Link uploaded file to project."""
+@app.route("/api/user/projects/<project_id>/file/<file_id>", methods=["POST"])
+@app.route("/api/user/projects/<project_id>/files", methods=["POST"])
+def attach_file_to_project(project_id: str, file_id: str = None):
+    """Link uploaded file(s) to project."""
     if project_id not in STATE["project_files"]:
         STATE["project_files"][project_id] = []
 
-    descriptor = STATE["uploaded_files"].get(file_id) or {
-        "id": file_id,
-        "name": f"file-{file_id}",
-        "type": "plain_text",
-    }
+    data = request.get_json(silent=True) or {}
+    fids = []
+    if file_id:
+        fids.append(file_id)
+    if "file_ids" in data and isinstance(data["file_ids"], list):
+        fids.extend(data["file_ids"])
+    if "file_id" in data and data["file_id"] and data["file_id"] not in fids:
+        fids.append(data["file_id"])
 
-    if not any(f["id"] == file_id for f in STATE["project_files"][project_id]):
-        STATE["project_files"][project_id].append(descriptor)
+    for fid in fids:
+        descriptor = STATE["uploaded_files"].get(fid) or {
+            "id": fid,
+            "name": f"file-{fid}",
+            "type": "plain_text",
+        }
+        if not any(f["id"] == fid for f in STATE["project_files"][project_id]):
+            STATE["project_files"][project_id].append(descriptor)
 
     return jsonify({"success": True}), 200
 

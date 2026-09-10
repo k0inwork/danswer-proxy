@@ -70,6 +70,27 @@ def test_create_chat_session_integer_project_id():
     assert call_kwargs["json"]["project_id"] == 63
 
 
+from orchestrator.config import API_TIMEOUT
+
+
+def test_attach_file_to_project_success():
+    client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
+    client._safe_request = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    client._safe_request.return_value = mock_resp
+
+    result = client.attach_file_to_project(project_id="63", file_id="fid-abc")
+    assert result is True
+
+    client._safe_request.assert_called_once_with(
+        "POST",
+        "http://localhost:8080/api/user/projects/63/files",
+        json={"file_ids": ["fid-abc"], "file_id": "fid-abc"},
+        timeout=API_TIMEOUT,
+    )
+
+
 def test_attach_file_to_project_failure_returns_false():
     client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
     client._safe_request = MagicMock()

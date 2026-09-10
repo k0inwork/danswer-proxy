@@ -130,18 +130,15 @@ class DanswerClient:
             return False
 
         endpoints = [
+            (f"{self.danswer_url}/api/user/projects/{pid_str}/files", "POST"),
             (f"{self.danswer_url}/api/user/projects/{pid_str}/files/{fid}", "POST"),
             (f"{self.danswer_url}/api/user/projects/{pid_str}/file/{fid}", "POST"),
-            (f"{self.danswer_url}/api/user/projects/{pid_str}/files", "POST"),
         ]
 
         for ep, method in endpoints:
             try:
-                if ep.endswith(f"/projects/{pid_str}/files"):
-                    pid_val = int(pid_str) if pid_str.isdigit() else pid_str
-                    res = self._safe_request(method, ep, json={"file_ids": [fid], "file_id": fid}, timeout=API_TIMEOUT)
-                else:
-                    res = self._safe_request(method, ep, timeout=API_TIMEOUT)
+                payload = {"file_ids": [fid], "file_id": fid}
+                res = self._safe_request(method, ep, json=payload, timeout=API_TIMEOUT)
 
                 if res.status_code in (200, 201, 204):
                     get_run_logger().log_action(
