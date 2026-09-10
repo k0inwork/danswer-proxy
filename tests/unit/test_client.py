@@ -118,7 +118,7 @@ def test_attach_file_to_project_skips_null_project_id_response():
     assert result is False
 
 
-def test_upload_project_file_passes_params():
+def test_upload_project_file_returns_distinct_file_id():
     client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
     client._safe_request = MagicMock()
     mock_resp = MagicMock()
@@ -127,8 +127,9 @@ def test_upload_project_file_passes_params():
         "user_files": [
             {
                 "id": "user-file-id-123",
+                "file_id": "project-file-id-456",
                 "name": "TOP_FOLDER_test.txt",
-                "project_id": 63,
+                "project_id": None,
             }
         ]
     }
@@ -136,6 +137,19 @@ def test_upload_project_file_passes_params():
 
     ret = client.upload_project_file(project_id=63, filename="TOP_FOLDER_test.txt", content_bytes=b"test")
     assert ret.get("id") == "user-file-id-123"
+    assert ret.get("file_id") == "project-file-id-456"
 
+    # Verify query params passed to request
     call_kwargs = client._safe_request.call_args[1]
     assert call_kwargs["params"] == {"project_id": 63}
+
+
+def test_delete_project_file():
+    client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
+    client._safe_request = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 204
+    client._safe_request.return_value = mock_resp
+
+    client.delete_project_file(file_id="fid-dup-1", project_id="63")
+    assert client._safe_request.call_count == 2

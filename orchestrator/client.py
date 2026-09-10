@@ -398,7 +398,7 @@ class DanswerClient:
             get_run_logger().log_file_upload(
                 file_path=filename,
                 canonical_name=upload_name,
-                file_id=str(ret_dict.get("id") or ""),
+                file_id=str(ret_dict.get("id") or ret_dict.get("file_id") or ""),
                 project_id=pid_str,
                 status="UPLOADED",
             )

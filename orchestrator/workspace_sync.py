@@ -79,7 +79,7 @@ class WorkspaceProjectSync:
             if desc.project_id:
                 try:
                     p_files = self.client.get_project_files(desc.project_id)
-                    p_fids = [str(f.get("id") or f.get("file_id") or "") for f in p_files if isinstance(f, dict)]
+                    p_fids = [str(f.get("file_id") or f.get("id") or "") for f in p_files if isinstance(f, dict)] + [str(f.get("id") or f.get("file_id") or "") for f in p_files if isinstance(f, dict)]
                     logger.info("CALLBACK [READY]: '%s' successfully attached to project_id=%s (Project file count: %d, contains file_id=%s: %s)", canonical, desc.project_id, len(p_files), desc.file_id, desc.file_id in p_fids)
                 except Exception as p_err:
                     logger.info("CALLBACK [READY]: '%s' successfully attached to project_id=%s (Verification lookup error: %s)", canonical, desc.project_id, p_err)
@@ -135,7 +135,7 @@ class WorkspaceProjectSync:
                 content_bytes=payload_bytes,
             )
 
-            fid = str(res.get("id", ""))
+            fid = str(res.get("file_id") or res.get("id") or "")
             ftype = res.get("file_type", "plain_text")
 
             if fid and hasattr(self.client, "wait_for_file_processing"):
@@ -255,7 +255,7 @@ class WorkspaceProjectSync:
                 filename=canonical,
                 content_bytes=full_payload,
             )
-            fid = str(res.get("id", ""))
+            fid = str(res.get("file_id") or res.get("id") or "")
             ftype = res.get("file_type", "plain_text")
 
             # 3. Wait for file processing
@@ -493,7 +493,7 @@ class WorkspaceProjectSync:
                 for f in match.get("files", []):
                     if isinstance(f, dict) and f.get("name"):
                         cname = f["name"]
-                        fid = str(f.get("id") or f.get("file_id") or "")
+                        fid = str(f.get("file_id") or f.get("id") or "")
                         ftype = f.get("type") or "plain_text"
                         self.descriptors[cname] = Descriptor(
                             canonical_name=cname,
@@ -521,12 +521,12 @@ class WorkspaceProjectSync:
 
                 for cname, flist in file_groups.items():
                     keep_f = flist[-1]
-                    fid = str(keep_f.get("id") or keep_f.get("file_id") or "")
+                    fid = str(keep_f.get("file_id") or keep_f.get("id") or "")
                     ftype = keep_f.get("type") or "plain_text"
 
                     if len(flist) > 1:
                         for dup_f in flist[:-1]:
-                            dup_fid = str(dup_f.get("id") or dup_f.get("file_id") or "")
+                            dup_fid = str(dup_f.get("file_id") or dup_f.get("id") or "")
                             if dup_fid and dup_fid != fid:
                                 logger.info("Cleaning up duplicate project file '%s' (file_id=%s)", cname, dup_fid)
                                 try:
