@@ -197,6 +197,69 @@ class TestBlockingFileSyncAndRedispatch(unittest.TestCase):
             full_output = "".join(chunks)
             self.assertIn(grounded_answer, full_output)
 
+    def test_intercept_tool_call_with_preamble_buffering(self):
+        """
+        Verify that when LLM output includes conversational preamble text before <local_tool>,
+        the preamble chunks are buffered and not prematurely yielded, allowing read tool call interception to succeed.
+        """
+        file_path = "cli/fins_viz/main.py"
+        canonical = self.sync.canonical_name(file_path, is_dir=False)
+
+        orchestrator = Orchestrator(
+            client=self.mock_client,
+            routing_manifest="Test manifest",
+            tool_ids=[1, 2],
+            workspace_sync=self.sync,
+        )
+
+        mock_segment = MagicMock()
+        mock_segment.session_id = "session-preamble-001"
+        mock_segment.persona_id = 0
+        mock_segment.inherited_context = ""
+        orchestrator.get_or_create_initial_segment = MagicMock(return_value=mock_segment)
+        orchestrator.detect_mode = MagicMock(return_value=("CONTINUE", 0, "same persona"))
+
+        preamble_chunk = f"Reading `{file_path}` now.\n"
+        tool_call_xml = (
+            '<local_tool>'
+            '<name>read_file</name>'
+            f'<arguments>{{"file_path": "{file_path}"}}</arguments>'
+            '</local_tool>'
+        )
+        grounded_answer = f"Here is the content of {file_path} after auto-grounding."
+
+        # Iter stream text yields preamble chunk first, then tool call XML in chunk 2
+        self.mock_client.iter_stream_text = MagicMock(side_effect=[
+            iter([preamble_chunk, tool_call_xml]),
+            iter([grounded_answer]),
+        ])
+
+        ready_desc = Descriptor(
+            canonical_name=canonical,
+            file_path=file_path,
+            file_id="onyx-preamble-uuid-456",
+            file_type="plain_text",
+            status=DescriptorStatus.READY,
+            project_id="proj-redispatch-test",
+        )
+        self.sync.descriptors[canonical] = ready_desc
+
+        with patch.object(self.sync, "upload_and_attach_blocking", return_value=ready_desc) as mock_sync:
+            messages = [{"role": "user", "content": f"read {file_path}"}]
+            chunks = list(orchestrator.process_query(
+                conversation_id="conv-preamble-1",
+                messages=messages,
+            ))
+
+            # Verify blocking sync was called despite preamble in chunk 1
+            mock_sync.assert_called_once_with(file_path)
+
+            # Verify send_message was called twice (turn 1 + redispatch turn 2)
+            self.assertEqual(self.mock_client.send_message.call_count, 2)
+
+            full_output = "".join(chunks)
+            self.assertIn(grounded_answer, full_output)
+
     def test_multi_tool_batch_intercept_and_redispatch(self):
         """
         Verify that when an LLM emits a batch of tools (e.g. list_dir + read_file),
