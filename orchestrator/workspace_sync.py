@@ -572,19 +572,33 @@ class WorkspaceProjectSync:
 
             if self.project_id:
                 p_files = self.client.get_project_files(self.project_id)
+                file_groups: Dict[str, List[Dict[str, Any]]] = {}
                 for f in p_files:
                     if isinstance(f, dict) and f.get("name"):
                         cname = f["name"]
-                        fid = str(f.get("id") or f.get("file_id") or "")
-                        ftype = f.get("type") or "plain_text"
-                        self.descriptors[cname] = Descriptor(
-                            canonical_name=cname,
-                            file_path="",
-                            file_id=fid,
-                            file_type=ftype,
-                            status=DescriptorStatus.READY,
-                            project_id=self.project_id
-                        )
+                        file_groups.setdefault(cname, []).append(f)
+
+                for cname, flist in file_groups.items():
+                    keep_f = flist[-1]
+                    fid = str(keep_f.get("id") or keep_f.get("file_id") or "")
+                    ftype = keep_f.get("type") or "plain_text"
+                    self.descriptors[cname] = Descriptor(
+                        canonical_name=cname,
+                        file_path="",
+                        file_id=fid,
+                        file_type=ftype,
+                        status=DescriptorStatus.READY,
+                        project_id=self.project_id
+                    )
+                    if len(flist) > 1:
+                        for dup_f in flist[:-1]:
+                            dup_fid = str(dup_f.get("id") or dup_f.get("file_id") or "")
+                            if dup_fid and dup_fid != fid:
+                                logger.info("Cleaning up duplicate project file '%s' (file_id=%s)", cname, dup_fid)
+                                try:
+                                    self.client.delete_project_file(dup_fid, self.project_id)
+                                except Exception as del_err:
+                                    logger.warning("Failed deleting duplicate file %s: %s", dup_fid, del_err)
 
             self.update_top_folder()
             self.sync_root_files()

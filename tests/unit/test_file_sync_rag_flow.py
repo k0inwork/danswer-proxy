@@ -250,6 +250,78 @@ class TestFileUploadAndRAGFlow(unittest.TestCase):
         self.assertEqual(final_desc.status, DescriptorStatus.READY)
         self.assertEqual(final_desc.file_id, "new-uuid-222")
 
+    def test_step5_duplicate_file_cleanup_on_initialize(self):
+        """
+        Verify that when project has duplicate files with the same name,
+        initialize_project keeps the newest file and deletes duplicate old file IDs.
+        """
+        self.mock_client.get_user_projects.return_value = [
+            {"id": "test-proj-123", "name": self.sync.project_name}
+        ]
+        self.mock_client.get_project_files.return_value = [
+            {"id": "dup-fid-1", "name": "TOP_FOLDER_test_workspace.txt", "type": "plain_text"},
+            {"id": "dup-fid-2", "name": "TOP_FOLDER_test_workspace.txt", "type": "plain_text"},
+            {"id": "dup-fid-3", "name": "TOP_FOLDER_test_workspace.txt", "type": "plain_text"},
+        ]
+
+        self.sync.initialize_project()
+
+        cname = "TOP_FOLDER_test_workspace.txt"
+        self.assertIn(cname, self.sync.descriptors)
+        self.assertEqual(self.sync.descriptors[cname].file_id, "dup-fid-3")
+
+        self.mock_client.delete_project_file.assert_any_call("dup-fid-1", "test-proj-123")
+        self.mock_client.delete_project_file.assert_any_call("dup-fid-2", "test-proj-123")
+
+    def test_step6_unassociated_file_reattach_recovery(self):
+        """
+        Verify that when Onyx throws 'not associated with project',
+        Orchestrator attempts to re-attach the descriptor first instead of discarding it.
+        """
+        canonical = "TOP_FOLDER_test_workspace.txt"
+        test_fid = "11111111-2222-3333-4444-555555555555"
+        desc = Descriptor(
+            canonical_name=canonical,
+            file_path="/tmp/test_workspace",
+            file_id=test_fid,
+            file_type="plain_text",
+            status=DescriptorStatus.READY,
+            project_id="test-proj-123",
+        )
+        self.sync.descriptors[canonical] = desc
+        self.sync.file_hashes[canonical] = "somehash"
+
+        orchestrator = Orchestrator(
+            client=self.mock_client,
+            routing_manifest="Test manifest",
+            tool_ids=[1, 2],
+            workspace_sync=self.sync,
+        )
+
+        orchestrator.detect_mode = MagicMock(return_value=("CONTINUE", 0, "same persona"))
+        mock_segment = MagicMock()
+        mock_segment.session_id = "sess-unassociated-test"
+        mock_segment.persona_id = 0
+        mock_segment.inherited_context = ""
+        orchestrator.get_or_create_initial_segment = MagicMock(return_value=mock_segment)
+
+        first_resp = MagicMock()
+        second_resp = MagicMock()
+        self.mock_client.send_message.side_effect = [
+            RuntimeError(f"Files {{'{test_fid}'}} are not associated with project test-proj-123"),
+            second_resp,
+        ]
+        self.mock_client.iter_stream_text.return_value = iter(["Success after re-attach"])
+        self.mock_client.attach_file_to_project.return_value = True
+
+        messages = [{"role": "user", "content": "hello"}]
+        chunks = list(orchestrator.process_query(conversation_id="conv-reattach", messages=messages))
+
+        self.mock_client.attach_file_to_project.assert_called_with("test-proj-123", test_fid)
+        self.assertEqual(desc.file_id, test_fid)
+        self.assertEqual(desc.status, DescriptorStatus.READY)
+        self.assertIn("Success after re-attach", "".join(chunks))
+
 
 if __name__ == "__main__":
     unittest.main()
