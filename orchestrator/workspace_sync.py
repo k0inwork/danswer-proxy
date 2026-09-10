@@ -208,8 +208,26 @@ class WorkspaceProjectSync:
                 logger.warning("File not found on workspace disk for blocking sync: %s", disk_path)
                 return None
 
-        content_bytes = content.encode("utf-8") if isinstance(content, str) else content
-        content_hash = hashlib.sha256(content_bytes).hexdigest()
+        if is_dir_canonical:
+            full_payload = content.encode("utf-8") if isinstance(content, str) else content
+            content_str = content if isinstance(content, str) else content.decode("utf-8", errors="replace")
+            body_str = content_str.split("\n\n", 1)[1] if "\n\n" in content_str else content_str
+            content_hash = hashlib.sha256(body_str.encode("utf-8")).hexdigest()
+        else:
+            content_bytes = content.encode("utf-8") if isinstance(content, str) else content
+            content_hash = hashlib.sha256(content_bytes).hexdigest()
+            abs_path = os.path.abspath(file_path if os.path.isabs(file_path) else os.path.join(self.root, file_path))
+            rev = self.revisions.get(canonical, 0) + 1
+            header = (
+                f"# WORKSPACE FILE SYNC: {abs_path}\n"
+                f"# SHA256: {content_hash[:12]} | REVISION: {rev}\n"
+                f"# ====================================================\n\n"
+            )
+            full_payload = header.encode("utf-8") + content_bytes
+            self.revisions[canonical] = rev
+            self.watched_files[canonical] = abs_path
+
+        self.file_hashes[canonical] = content_hash
 
         with self._lock:
             desc = self.descriptors.get(canonical)
@@ -224,20 +242,6 @@ class WorkspaceProjectSync:
             else:
                 desc.status = DescriptorStatus.PENDING_UPLOAD
                 desc.file_path = file_path
-
-        abs_path = os.path.abspath(file_path if os.path.isabs(file_path) else os.path.join(self.root, file_path))
-        rev = self.revisions.get(canonical, 0) + 1
-        header = (
-            f"# WORKSPACE FILE SYNC: {abs_path}\n"
-            f"# SHA256: {content_hash[:12]} | REVISION: {rev}\n"
-            f"# ====================================================\n\n"
-        )
-        full_payload = header.encode("utf-8") + content_bytes if not is_dir_canonical else content_bytes
-
-        self.file_hashes[canonical] = content_hash
-        if not is_dir_canonical:
-            self.revisions[canonical] = rev
-            self.watched_files[canonical] = abs_path
 
         try:
             # Check and cleanup existing file if present
