@@ -534,15 +534,7 @@ class WorkspaceProjectSync:
                                 except Exception as del_err:
                                     logger.warning("Failed deleting duplicate file %s: %s", dup_fid, del_err)
 
-                    # Re-verify project attachment for keep_f to ensure the descriptor is active and valid in Onyx
-                    is_attached = False
                     if fid and self.project_id:
-                        try:
-                            is_attached = self.client.attach_file_to_project(self.project_id, fid)
-                        except Exception as attach_err:
-                            logger.warning("Attachment verification failed for '%s' (file_id=%s): %s", cname, fid, attach_err)
-
-                    if is_attached:
                         self.descriptors[cname] = Descriptor(
                             canonical_name=cname,
                             file_path="",
@@ -551,13 +543,14 @@ class WorkspaceProjectSync:
                             status=DescriptorStatus.READY,
                             project_id=self.project_id
                         )
-                    else:
-                        logger.info("Descriptor '%s' (file_id=%s) failed attachment check; invalidating stale reference", cname, fid)
-                        if cname in self.file_hashes:
-                            del self.file_hashes[cname]
+                        logger.info("Registered active project file descriptor '%s' (file_id=%s)", cname, fid)
 
-            if "TOP_FOLDER_" + self.sanitize_path(self.root) + ".txt" in self.file_hashes:
-                del self.file_hashes["TOP_FOLDER_" + self.sanitize_path(self.root) + ".txt"]
+            top_folder_cname = "TOP_FOLDER_" + self.sanitize_path(self.root) + ".txt"
+            top_desc = self.descriptors.get(top_folder_cname)
+            if not top_desc or top_desc.status != DescriptorStatus.READY:
+                if top_folder_cname in self.file_hashes:
+                    del self.file_hashes[top_folder_cname]
+
             self.update_top_folder()
             self.sync_root_files()
             self.start_background_watcher()
