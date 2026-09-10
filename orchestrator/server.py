@@ -322,6 +322,41 @@ def list_models():
     )
 
 
+@app.route("/api/tags", methods=["GET"])
+def ollama_tags():
+    models_list = []
+    for model_key, model_info in MODELS.items():
+        disp_name = model_info[0]
+        models_list.append({
+            "name": model_key,
+            "model": model_key,
+            "modified_at": "2026-01-01T00:00:00Z",
+            "size": 0,
+            "digest": f"sha256:{model_key}",
+            "details": {
+                "parent_model": "",
+                "format": "gguf",
+                "family": "danswer",
+                "families": ["danswer"],
+                "parameter_size": disp_name,
+                "quantization_level": "default",
+            },
+        })
+
+    return Response(
+        json.dumps({"models": models_list}, ensure_ascii=False),
+        mimetype="application/json",
+    )
+
+
+@app.route("/api/version", methods=["GET"])
+def ollama_version():
+    return Response(
+        json.dumps({"version": "0.3.0"}),
+        mimetype="application/json",
+    )
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return {

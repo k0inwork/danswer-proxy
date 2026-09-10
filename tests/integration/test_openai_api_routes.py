@@ -46,6 +46,23 @@ def test_list_models_handler():
     assert "claude-3-opus-20240229" not in model_ids
 
 
+def test_ollama_tags_handler():
+    res = server_mod.ollama_tags()
+    assert res is not None
+    data = json.loads(res.get_data(as_text=True))
+    assert "models" in data
+    model_names = [m["name"] for m in data["models"]]
+    assert "claude-sonnet-4.6" in model_names
+    assert "glm-4" in model_names
+
+
+def test_ollama_version_handler():
+    res = server_mod.ollama_version()
+    assert res is not None
+    data = json.loads(res.get_data(as_text=True))
+    assert data.get("version") == "0.3.0"
+
+
 def test_chat_completions_handler_uninitialized():
     with patch.object(server_mod, "orchestrator", None):
         res = server_mod.chat_completions()
