@@ -320,6 +320,20 @@ class TestFileUploadAndRAGFlow(unittest.TestCase):
         self.mock_client.upload_project_file.assert_called()
         self.assertIn("Success after re-attach", "".join(chunks))
 
+    def test_step7_execute_local_non_read_tool_single_execution(self):
+        """
+        Verify execute_local_non_read_tool only executes the requested tool once
+        and write_workspace_file performs blocking sync directly.
+        """
+        mock_write = MagicMock(return_value=Descriptor("FILE_test_txt.txt", "test.txt", status=DescriptorStatus.READY))
+        self.sync.write_workspace_file = mock_write
+
+        res = self.sync.execute_local_non_read_tool("write_file", {"file_path": "test.txt", "content": "hello world"})
+
+        self.assertIn("Successfully wrote 11 bytes", res)
+        # Verify write_workspace_file was called exactly once
+        mock_write.assert_called_once_with("test.txt", "hello world")
+
 
 if __name__ == "__main__":
     unittest.main()
