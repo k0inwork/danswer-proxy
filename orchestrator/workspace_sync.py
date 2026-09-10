@@ -76,7 +76,15 @@ class WorkspaceProjectSync:
             if not desc:
                 return
             desc.status = DescriptorStatus.READY
-            logger.info("CALLBACK [READY]: '%s' successfully attached to project_id=%s", canonical, desc.project_id)
+            if desc.project_id:
+                try:
+                    p_files = self.client.get_project_files(desc.project_id)
+                    p_fids = [str(f.get("id") or f.get("file_id") or "") for f in p_files if isinstance(f, dict)]
+                    logger.info("CALLBACK [READY]: '%s' successfully attached to project_id=%s (Project file count: %d, contains file_id=%s: %s)", canonical, desc.project_id, len(p_files), desc.file_id, desc.file_id in p_fids)
+                except Exception as p_err:
+                    logger.info("CALLBACK [READY]: '%s' successfully attached to project_id=%s (Verification lookup error: %s)", canonical, desc.project_id, p_err)
+            else:
+                logger.info("CALLBACK [READY]: '%s' successfully attached to project_id=%s", canonical, desc.project_id)
             self.save_cache()
 
         get_run_logger().log_file_upload(

@@ -140,15 +140,14 @@ class DanswerClient:
                 payload = {"file_ids": [fid], "file_id": fid}
                 res = self._safe_request(method, ep, json=payload, timeout=API_TIMEOUT)
 
+                logger.info("Attachment candidate endpoint %s returned HTTP %s: %s", ep, res.status_code, res.text[:200])
                 if res.status_code in (200, 201, 204):
                     get_run_logger().log_action(
                         category="FILE_ATTACH",
                         action="SUCCESS",
-                        details={"project_id": pid_str, "file_id": fid, "endpoint": ep},
+                        details={"project_id": pid_str, "file_id": fid, "endpoint": ep, "response_status": res.status_code},
                     )
                     return True
-                else:
-                    logger.debug("Attachment candidate endpoint %s returned code %s", ep, res.status_code)
             except Exception as exc:
                 logger.debug("Failed endpoint %s: %s", ep, exc)
                 continue
