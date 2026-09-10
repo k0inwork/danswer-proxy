@@ -47,14 +47,60 @@ PRIMARY_PERSONA_ID = 0
 
 # model_id -> (display_name, provider, version_for_api)
 MODELS = {
-    "gpt-5.4-nano": ("GPT-5.4 Nano", "chagpt5.4", "gpt-5.4-nano"),
-    "azure-gpt54-nano": ("Azure GPT-5.4 Nano", "LiteLLM", "azure-gpt54-nano"),
     "claude-sonnet-4.6": (
         "Claude Sonnet 4.6",
         "Azure Claude-Sonnet4.6",
         "claude-sonnet-4-6",
     ),
+    "glm-4": ("GLM-4", "LiteLLM", "glm-4"),
+    "gpt-5.4-nano": ("GPT-5.4 Nano", "chagpt5.4", "gpt-5.4-nano"),
+    "azure-gpt54-nano": ("Azure GPT-5.4 Nano", "LiteLLM", "azure-gpt54-nano"),
 }
+
+MODEL_ALIASES = {
+    "glm": "glm-4",
+    "glm4": "glm-4",
+    "glm-4": "glm-4",
+    "zhipu": "glm-4",
+    "sonnet": "claude-sonnet-4.6",
+    "claude": "claude-sonnet-4.6",
+    "claude-sonnet": "claude-sonnet-4.6",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "sonnet-4.6": "claude-sonnet-4.6",
+    "gpt": "gpt-5.4-nano",
+    "gpt-5.4": "gpt-5.4-nano",
+    "gpt-5.4-nano": "gpt-5.4-nano",
+    "gpt54": "gpt-5.4-nano",
+    "azure": "azure-gpt54-nano",
+    "azure-gpt": "azure-gpt54-nano",
+    "azure-gpt54-nano": "azure-gpt54-nano",
+}
+
+
+def resolve_model_key(input_str: str) -> Optional[str]:
+    """Resolve user input model string or alias to a valid key in MODELS."""
+    if not input_str or not isinstance(input_str, str):
+        return None
+    cleaned = input_str.strip().lower()
+
+    if cleaned in MODELS:
+        return cleaned
+
+    if cleaned in MODEL_ALIASES:
+        return MODEL_ALIASES[cleaned]
+
+    model_keys = list(MODELS.keys())
+    if cleaned.isdigit():
+        idx = int(cleaned) - 1
+        if 0 <= idx < len(model_keys):
+            return model_keys[idx]
+
+    for key in model_keys:
+        if cleaned in key.lower() or key.lower() in cleaned:
+            return key
+
+    return None
+
 
 ROUTING_MODEL = "gpt-5.4-nano"
 COMPACTION_MODEL = "gpt-5.4-nano"

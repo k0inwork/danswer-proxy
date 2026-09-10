@@ -8,12 +8,14 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from orchestrator.client import DanswerClient
 from orchestrator.config import (
+    MODELS,
     PERSONAS,
     PRIMARY_PERSONA_ID,
     REAL_TALK_MODEL,
     ROUTING_MODEL,
     get_run_logger,
     logger,
+    resolve_model_key,
 )
 from orchestrator.models import DescriptorStatus, Segment
 from orchestrator.session_store import ConversationStore
@@ -77,6 +79,100 @@ class Orchestrator:
         self.tool_ids = tool_ids
         self.workspace_sync = workspace_sync
         self.sessions = ConversationStore(client=client)
+        self.active_models: Dict[str, str] = {}
+
+    def get_active_model(self, conversation_id: str) -> str:
+        return self.active_models.get(conversation_id, REAL_TALK_MODEL)
+
+    def set_active_model(self, conversation_id: str, model_key: str) -> None:
+        self.active_models[conversation_id] = model_key
+
+    def parse_model_command(self, user_query: str) -> Optional[Tuple[str, Optional[str]]]:
+        if not user_query or not isinstance(user_query, str):
+            return None
+
+        q = user_query.strip()
+        lower_q = q.lower()
+
+        is_command = False
+        arg_str = ""
+
+        if lower_q.startswith("/model") or lower_q.startswith("/models"):
+            is_command = True
+            if lower_q.startswith("/models"):
+                arg_str = q[7:].strip()
+            else:
+                arg_str = q[6:].strip()
+        elif lower_q == "model" or lower_q.startswith("model ") or lower_q.startswith("model:") or lower_q.startswith("model="):
+            is_command = True
+            if lower_q.startswith("model:"):
+                arg_str = q[6:].strip()
+            elif lower_q.startswith("model="):
+                arg_str = q[6:].strip()
+            elif lower_q.startswith("model "):
+                arg_str = q[6:].strip()
+            else:
+                arg_str = ""
+
+        if not is_command:
+            return None
+
+        lower_arg = arg_str.lower().strip()
+        for prefix in ("switch to ", "switch ", "select ", "set ", "use "):
+            if lower_arg.startswith(prefix):
+                lower_arg = lower_arg[len(prefix):].strip()
+
+        if not lower_arg or lower_arg in {"list", "show", "get", "help", "status"}:
+            return ("LIST", None)
+        else:
+            return ("SWITCH", lower_arg)
+
+    def handle_model_command(
+        self, conversation_id: str, command_type: str, target: Optional[str] = None
+    ) -> str:
+        current_model = self.get_active_model(conversation_id)
+        current_display = MODELS.get(current_model, (current_model,))[0]
+
+        model_lines = []
+        for idx, (m_key, m_info) in enumerate(MODELS.items(), 1):
+            disp_name = m_info[0]
+            is_active = (m_key == current_model)
+            tag = " [ACTIVE]" if is_active else ""
+            model_lines.append(f"  {idx}. {disp_name} ({m_key}){tag}")
+
+        list_block = "Available Danswer models:\n" + "\n".join(model_lines)
+
+        if command_type == "LIST":
+            return (
+                f"{list_block}\n\n"
+                f"Current active model: {current_display} ({current_model})\n"
+                "To switch models, use: `/model <name>` (e.g., `/model glm` or `/model sonnet`)."
+            )
+
+        if command_type == "SWITCH" and target:
+            resolved_key = resolve_model_key(target)
+            if resolved_key:
+                old_model = current_model
+                self.set_active_model(conversation_id, resolved_key)
+                new_display = MODELS[resolved_key][0]
+                get_run_logger().log_action(
+                    category="MODEL",
+                    action="SWITCH_MODEL",
+                    details={
+                        "conversation_id": conversation_id,
+                        "previous_model": old_model,
+                        "new_model": resolved_key,
+                    },
+                )
+                return f"Switched active Danswer model to {new_display} ({resolved_key})."
+            else:
+                return (
+                    f"Unknown model '{target}'.\n\n"
+                    f"{list_block}\n\n"
+                    "Use `/model <name>` (e.g., `/model glm` or `/model sonnet`) to select a valid model."
+                )
+
+        return f"{list_block}"
 
     def complete_non_streaming(
         self, session_id: str, message: str, temperature: float, model: str, disable_search: bool = False
@@ -224,6 +320,16 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                 if user_query:
                     break
 
+        model_cmd = self.parse_model_command(user_query)
+        if model_cmd:
+            cmd_type, target = model_cmd
+            output_msg = self.handle_model_command(conversation_id, cmd_type, target)
+            if user_query:
+                self.sessions.append_message(conversation_id=conversation_id, role="user", content=user_query)
+            self.sessions.append_message(conversation_id=conversation_id, role="assistant", content=output_msg)
+            yield output_msg
+            return
+
         decision, target_persona, reason = self.detect_mode(
             conversation_id=conversation_id,
             current_persona_id=active.persona_id,
@@ -281,6 +387,8 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         tool_inventory_appendix = self.format_external_tools_for_danswer(external_tools)
         message_for_persona = f"{base_message}\n{tool_inventory_appendix}" if tool_inventory_appendix else base_message
 
+        active_model = self.get_active_model(conversation_id)
+
         if user_query:
             self.sessions.append_message(conversation_id=conversation_id, role="user", content=user_query)
 
@@ -305,7 +413,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         temperature=0.3,
                         allowed_tool_ids=self.tool_ids,
                         file_descriptors=file_descriptors,
-                        model=REAL_TALK_MODEL,
+                        model=active_model,
                     )
 
                     buffered_output = ""
@@ -441,7 +549,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         final_answer = "".join(chunks)
         self.sessions.append_message(conversation_id=conversation_id, role="assistant", content=final_answer)
         get_run_logger().log_llm_response(
-            model=REAL_TALK_MODEL,
+            model=active_model,
             session_id=active.session_id,
             response_summary=final_answer,
             extra={"conversation_id": conversation_id},
