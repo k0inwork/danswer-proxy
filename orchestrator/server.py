@@ -152,8 +152,9 @@ def chat_completions():
             if tool_invocations:
                 openai_tool_calls = []
                 clean_content = full_text
-                for inv in tool_invocations:
+                for idx, inv in enumerate(tool_invocations):
                     openai_tool_calls.append({
+                        "index": idx,
                         "id": f"call_{uuid4().hex[:8]}",
                         "type": "function",
                         "function": {

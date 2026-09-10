@@ -148,6 +148,7 @@ class StreamingXmlToolParser:
                 tool_inv = extract_local_tool_invocation(full_xml)
                 if tool_inv:
                     tool_calls.append({
+                        "index": 0,
                         "id": f"call_{uuid4().hex[:8]}",
                         "type": "function",
                         "function": {

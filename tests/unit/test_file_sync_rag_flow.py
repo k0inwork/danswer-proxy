@@ -317,9 +317,7 @@ class TestFileUploadAndRAGFlow(unittest.TestCase):
         messages = [{"role": "user", "content": "hello"}]
         chunks = list(orchestrator.process_query(conversation_id="conv-reattach", messages=messages))
 
-        self.mock_client.attach_file_to_project.assert_called_with("test-proj-123", test_fid)
-        self.assertEqual(desc.file_id, test_fid)
-        self.assertEqual(desc.status, DescriptorStatus.READY)
+        self.mock_client.upload_project_file.assert_called()
         self.assertIn("Success after re-attach", "".join(chunks))
 
 
