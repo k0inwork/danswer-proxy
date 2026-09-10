@@ -45,3 +45,30 @@ def test_chat_completions_handler_uninitialized():
         res = server_mod.chat_completions()
         assert res[1] == 503
         assert res[0]["error"] == "Orchestrator is not initialized"
+
+
+def test_chat_completions_non_streaming_multi_tool():
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.process_query.return_value = iter([
+        "Let me check two files:\n",
+        '<local_tool><name>read_file</name><arguments>{"file_path": "a.txt"}</arguments></local_tool>\n',
+        '<local_tool><name>read_file</name><arguments>{"file_path": "b.txt"}</arguments></local_tool>'
+    ])
+
+    with patch.object(server_mod, "orchestrator", mock_orchestrator):
+        with server_mod.app.test_request_context(
+            "/v1/chat/completions",
+            method="POST",
+            json={
+                "messages": [{"role": "user", "content": "read a and b"}],
+                "stream": False,
+            },
+        ):
+            res = server_mod.chat_completions()
+            data = json.loads(res.get_data(as_text=True))
+            assert "choices" in data
+            msg = data["choices"][0]["message"]
+            assert len(msg["tool_calls"]) == 2
+            assert msg["tool_calls"][0]["function"]["name"] == "read_file"
+            assert msg["tool_calls"][1]["function"]["name"] == "read_file"
+            assert data["choices"][0]["finish_reason"] == "tool_calls"

@@ -147,18 +147,25 @@ def chat_completions():
                     external_tools=external_tools,
                 )
             )
-            tool_invocation = DanswerClient.extract_local_tool_invocation(full_text)
+            tool_invocations = DanswerClient.extract_all_local_tool_invocations(full_text)
 
-            if tool_invocation:
-                openai_tool_calls = [{
-                    "id": f"call_{uuid4().hex[:8]}",
-                    "type": "function",
-                    "function": {
-                        "name": tool_invocation["name"],
-                        "arguments": json.dumps(tool_invocation["arguments"], ensure_ascii=False),
-                    },
-                }]
-                clean_content = full_text.replace(tool_invocation["raw"], "").strip()
+            if tool_invocations:
+                openai_tool_calls = []
+                clean_content = full_text
+                for inv in tool_invocations:
+                    openai_tool_calls.append({
+                        "id": f"call_{uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": inv["name"],
+                            "arguments": json.dumps(inv["arguments"], ensure_ascii=False) if isinstance(inv["arguments"], dict) else str(inv["arguments"]),
+                        },
+                    })
+                    raw_tag = inv.get("raw")
+                    if raw_tag and raw_tag in clean_content:
+                        clean_content = clean_content.replace(raw_tag, "")
+
+                clean_content = clean_content.strip()
                 response_body = {
                     "id": completion_id,
                     "object": "chat.completion",
