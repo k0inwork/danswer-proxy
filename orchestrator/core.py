@@ -538,8 +538,8 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
 
                                     fpath = desc.file_path or (cname.replace("TOP_FOLDER_", "").replace(".txt", "") if cname.startswith("TOP_FOLDER") else "")
                                     if cname.startswith("TOP_FOLDER"):
-                                        logger.info("Re-synchronizing top folder map for descriptor '%s'", cname)
-                                        self.workspace_sync.update_top_folder()
+                                        logger.info("Re-synchronizing top folder map synchronously for descriptor '%s'", cname)
+                                        self.workspace_sync.update_top_folder(blocking=True)
                                     elif fpath:
                                         logger.info("Re-uploading and attaching unassociated file '%s' (path=%s)", cname, fpath)
                                         self.workspace_sync.upload_and_attach_blocking(fpath)

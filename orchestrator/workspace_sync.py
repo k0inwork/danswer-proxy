@@ -191,7 +191,8 @@ class WorkspaceProjectSync:
         Synchronously uploads, waits for processing, and attaches a workspace file to the active Onyx project.
         Blocks the calling thread until DescriptorStatus is READY or FAILED.
         """
-        canonical = self.canonical_name(file_path, is_dir=False)
+        is_dir_canonical = file_path.startswith("TOP_FOLDER_") or file_path.startswith("FOLDER_")
+        canonical = file_path if is_dir_canonical else self.canonical_name(file_path, is_dir=False)
 
         # 1. Resolve content from memory or disk
         if content is None:
@@ -207,7 +208,8 @@ class WorkspaceProjectSync:
                 logger.warning("File not found on workspace disk for blocking sync: %s", disk_path)
                 return None
 
-        payload_bytes = content.encode("utf-8")
+        content_bytes = content.encode("utf-8") if isinstance(content, str) else content
+        content_hash = hashlib.sha256(content_bytes).hexdigest()
 
         with self._lock:
             desc = self.descriptors.get(canonical)
@@ -223,6 +225,20 @@ class WorkspaceProjectSync:
                 desc.status = DescriptorStatus.PENDING_UPLOAD
                 desc.file_path = file_path
 
+        abs_path = os.path.abspath(file_path if os.path.isabs(file_path) else os.path.join(self.root, file_path))
+        rev = self.revisions.get(canonical, 0) + 1
+        header = (
+            f"# WORKSPACE FILE SYNC: {abs_path}\n"
+            f"# SHA256: {content_hash[:12]} | REVISION: {rev}\n"
+            f"# ====================================================\n\n"
+        )
+        full_payload = header.encode("utf-8") + content_bytes if not is_dir_canonical else content_bytes
+
+        self.file_hashes[canonical] = content_hash
+        if not is_dir_canonical:
+            self.revisions[canonical] = rev
+            self.watched_files[canonical] = abs_path
+
         try:
             # Check and cleanup existing file if present
             existing_fid = getattr(desc, 'file_id', None)
@@ -236,7 +252,7 @@ class WorkspaceProjectSync:
             res = self.client.upload_project_file(
                 project_id=self.project_id or "",
                 filename=canonical,
-                content_bytes=payload_bytes,
+                content_bytes=full_payload,
             )
             fid = str(res.get("id", ""))
             ftype = res.get("file_type", "plain_text")
@@ -245,7 +261,19 @@ class WorkspaceProjectSync:
             if fid and hasattr(self.client, "wait_for_file_processing"):
                 self.client.wait_for_file_processing(fid)
 
-            self._on_upload_complete(canonical, fid, ftype)
+            # Update descriptor state directly without launching async attach task
+            with self._lock:
+                desc.file_id = fid
+                desc.file_type = ftype
+                desc.status = DescriptorStatus.UPLOADED
+
+            get_run_logger().log_file_upload(
+                file_path=desc.file_path,
+                canonical_name=canonical,
+                file_id=fid,
+                project_id=desc.project_id,
+                status="UPLOADED",
+            )
 
             # 4. Direct attach
             if self.project_id and fid:
@@ -261,7 +289,7 @@ class WorkspaceProjectSync:
     def write_workspace_file(self, file_path: str, content: str) -> Optional[Descriptor]:
         """
         Writes content to a file in the workspace directory (self.root), creates parent directories
-        if necessary, and syncs/attaches the updated file with Onyx.
+        if necessary, and syncs/attaches the updated file synchronously with Onyx using blocking upload.
         """
         target_path = os.path.join(self.root, file_path) if not os.path.isabs(file_path) else file_path
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -272,116 +300,16 @@ class WorkspaceProjectSync:
             action="WRITE_WORKSPACE_FILE",
             details={"file_path": target_path, "bytes": len(content.encode("utf-8"))},
         )
-        return self.on_tool_read(target_path, content)
+        return self.upload_and_attach_blocking(file_path=target_path, content=content)
 
     def execute_local_non_read_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
         """
         Executes a local tool against the workspace disk (e.g. list_dir, grep_search, find_files, write_file).
         """
         t_name = (tool_name or "").lower().strip()
+        res_output = ""
 
         # 1. Directory listing (list_dir, ls, dir)
-        if t_name in {"list_dir", "ls", "dir"}:
-            req_path = args.get("path") or args.get("directory") or args.get("dir_path") or "."
-            target_dir = os.path.join(self.root, req_path) if not os.path.isabs(req_path) else req_path
-            if os.path.exists(target_dir) and os.path.isdir(target_dir):
-                try:
-                    entries = sorted(os.listdir(target_dir))
-                    formatted_entries = []
-                    for e in entries:
-                        full_e = os.path.join(target_dir, e)
-                        suffix = "/" if os.path.isdir(full_e) else ""
-                        formatted_entries.append(f"{e}{suffix}")
-                    return f"Directory listing of '{req_path}':\n" + "\n".join(formatted_entries[:100])
-                except Exception as err:
-                    return f"Error listing directory '{req_path}': {err}"
-            else:
-                return f"Directory not found: '{req_path}'"
-
-        # 2. Grep search (grep_search, grep, search_code)
-        if t_name in {"grep_search", "grep", "search_code"}:
-            query = args.get("query") or args.get("pattern") or args.get("regex") or ""
-            search_path = args.get("path") or "."
-            target_dir = os.path.join(self.root, search_path) if not os.path.isabs(search_path) else search_path
-            matches = []
-            if os.path.exists(target_dir):
-                for root_dir, _, files in os.walk(target_dir):
-                    for file in files:
-                        if file.startswith(".") or file.endswith((".pyc", ".png", ".jpg", ".cache")):
-                            continue
-                        fpath = os.path.join(root_dir, file)
-                        try:
-                            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                                for line_no, line in enumerate(f, 1):
-                                    if query and query in line:
-                                        rel = os.path.relpath(fpath, self.root)
-                                        matches.append(f"{rel}:{line_no}: {line.strip()}")
-                                        if len(matches) >= 30:
-                                            break
-                        except Exception:
-                            continue
-                        if len(matches) >= 30:
-                            break
-                    if len(matches) >= 30:
-                        break
-            if matches:
-                return f"Found {len(matches)} matches for '{query}':\n" + "\n".join(matches)
-            return f"No matches found for '{query}' in path '{search_path}'."
-
-        # 3. Find files / glob (find_files, glob, find)
-        if t_name in {"find_files", "glob", "find"}:
-            search_pattern = args.get("pattern") or args.get("query") or "*"
-            search_path = args.get("path") or "."
-            target_dir = os.path.join(self.root, search_path) if not os.path.isabs(search_path) else search_path
-            matches = []
-            if os.path.exists(target_dir):
-                for root_dir, _, files in os.walk(target_dir):
-                    for file in files:
-                        if file.startswith("."):
-                            continue
-                        rel_f = os.path.relpath(os.path.join(root_dir, file), self.root)
-                        if search_pattern == "*" or search_pattern.lower() in file.lower():
-                            matches.append(rel_f)
-                            if len(matches) >= 50:
-                                break
-                    if len(matches) >= 50:
-                        break
-            if matches:
-                return f"Found {len(matches)} matching files for '{search_pattern}':\n" + "\n".join(matches)
-            return f"No files matching '{search_pattern}' found in path '{search_path}'."
-
-        # 4. Write / Create / Edit file operations (write_file, write, create_file, edit_file, modify_file, save_file, replace_in_file)
-        if t_name in {"write_file", "write", "create_file", "edit_file", "modify_file", "save_file", "replace_in_file"}:
-            req_path = args.get("file_path") or args.get("path") or args.get("filename") or args.get("target_file")
-            if not req_path:
-                return "Error: File path argument missing for write operation."
-
-            content = args.get("content") or args.get("text") or args.get("file_content") or args.get("code") or ""
-
-            # Check if replace_in_file style string replacement is requested
-            old_str = args.get("old_str") or args.get("search") or args.get("find")
-            new_str = args.get("new_str") or args.get("replace")
-            if old_str is not None and new_str is not None:
-                target_path = os.path.join(self.root, req_path) if not os.path.isabs(req_path) else req_path
-                if os.path.exists(target_path):
-                    try:
-                        with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
-                            existing_content = f.read()
-                        if old_str in existing_content:
-                            content = existing_content.replace(old_str, new_str)
-                        else:
-                            return f"String '{old_str}' not found in file '{req_path}'."
-                    except Exception as err:
-                        return f"Error reading file '{req_path}' for replacement: {err}"
-
-            try:
-                desc = self.write_workspace_file(req_path, content)
-                return f"Successfully wrote {len(content.encode('utf-8'))} bytes to file '{req_path}' in workspace."
-            except Exception as err:
-                return f"Error writing file '{req_path}': {err}"
-
-        res_output = ""
-        # Execute tool logic above
         if t_name in {"list_dir", "ls", "dir"}:
             req_path = args.get("path") or args.get("directory") or args.get("dir_path") or "."
             target_dir = os.path.join(self.root, req_path) if not os.path.isabs(req_path) else req_path
@@ -399,6 +327,7 @@ class WorkspaceProjectSync:
             else:
                 res_output = f"Directory not found: '{req_path}'"
 
+        # 2. Grep search (grep_search, grep, search_code)
         elif t_name in {"grep_search", "grep", "search_code"}:
             query = args.get("query") or args.get("pattern") or args.get("regex") or ""
             search_path = args.get("path") or "."
@@ -429,6 +358,7 @@ class WorkspaceProjectSync:
             else:
                 res_output = f"No matches found for '{query}' in path '{search_path}'."
 
+        # 3. Find files / glob (find_files, glob, find)
         elif t_name in {"find_files", "glob", "find"}:
             search_pattern = args.get("pattern") or args.get("query") or "*"
             search_path = args.get("path") or "."
@@ -451,12 +381,15 @@ class WorkspaceProjectSync:
             else:
                 res_output = f"No files matching '{search_pattern}' found in path '{search_path}'."
 
+        # 4. Write / Create / Edit file operations (write_file, write, create_file, edit_file, modify_file, save_file, replace_in_file)
         elif t_name in {"write_file", "write", "create_file", "edit_file", "modify_file", "save_file", "replace_in_file"}:
             req_path = args.get("file_path") or args.get("path") or args.get("filename") or args.get("target_file")
             if not req_path:
                 res_output = "Error: File path argument missing for write operation."
             else:
                 content = args.get("content") or args.get("text") or args.get("file_content") or args.get("code") or ""
+
+                # Check if replace_in_file style string replacement is requested
                 old_str = args.get("old_str") or args.get("search") or args.get("find")
                 new_str = args.get("new_str") or args.get("replace")
                 if old_str is not None and new_str is not None:
@@ -478,6 +411,7 @@ class WorkspaceProjectSync:
                         res_output = f"Successfully wrote {len(content.encode('utf-8'))} bytes to file '{req_path}' in workspace."
                     except Exception as err:
                         res_output = f"Error writing file '{req_path}': {err}"
+
         else:
             res_output = f"Tool '{tool_name}' executed with arguments: {json.dumps(args, ensure_ascii=False)}"
 
@@ -709,16 +643,16 @@ class WorkspaceProjectSync:
 
         return "\n".join(lines)
 
-    def update_top_folder(self) -> Optional[Descriptor]:
+    def update_top_folder(self, blocking: bool = False) -> Optional[Descriptor]:
         tree_text = self.generate_tree_map()
         tree_hash = hashlib.sha256(tree_text.encode('utf-8')).hexdigest()
         canonical = f"TOP_FOLDER_{self.sanitize_path(self.root)}.txt"
 
         desc = self.descriptors.get(canonical)
-        if self.file_hashes.get(canonical) == tree_hash and desc and desc.status in {DescriptorStatus.PENDING_UPLOAD, DescriptorStatus.UPLOADED, DescriptorStatus.READY}:
+        if not blocking and self.file_hashes.get(canonical) == tree_hash and desc and desc.status in {DescriptorStatus.PENDING_UPLOAD, DescriptorStatus.UPLOADED, DescriptorStatus.READY}:
             return desc
 
-        if desc and desc.status == DescriptorStatus.READY and canonical not in self.file_hashes:
+        if not blocking and desc and desc.status == DescriptorStatus.READY and canonical not in self.file_hashes:
             self.file_hashes[canonical] = tree_hash
             self.save_cache()
             return desc
@@ -733,6 +667,8 @@ class WorkspaceProjectSync:
             size_bytes=len(full_payload),
             source="update_top_folder",
         )
+        if blocking:
+            return self.upload_and_attach_blocking(file_path=canonical, content=full_payload.decode('utf-8', errors='replace'))
         return self.dispatch_file_sync(canonical, self.root, full_payload)
 
     def on_tool_read(self, file_path: str, content: str) -> Optional[Descriptor]:
