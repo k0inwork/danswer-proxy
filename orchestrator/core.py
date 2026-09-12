@@ -4,6 +4,7 @@ Core Orchestration engine managing persona handovers, tool interception, and mul
 
 import json
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from orchestrator.client import DanswerClient
@@ -454,6 +455,8 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         current_message_to_send = message_for_persona
         redispatch_count = 0
         max_redispatches = MAX_REDISPATCHES
+        rate_limit_retries = 0
+        max_rate_limit_retries = 5
 
         try:
             while redispatch_count <= max_redispatches:
@@ -475,6 +478,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                     intercepted_batch = False
                     streamed_anything = False
                     turn_chunks: List[str] = []
+                    sent_content = False
 
                     for chunk in self.client.iter_stream_text(response):
                         buffered_output += chunk
@@ -619,6 +623,28 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                         logger.info("Re-uploading and attaching unassociated file '%s' (path=%s)", cname, fpath)
                                         self.workspace_sync.upload_and_attach_blocking(fpath)
                         redispatch_count += 1
+                        continue
+                    # Graceful rate-limit handling: Onyx reports e.g.
+                    # "Rate limit of 250000 per 60s exceeded ... Please wait 33
+                    # seconds before retrying." If nothing was streamed yet,
+                    # notify the client, wait the indicated time and retry the
+                    # exact same message instead of failing the request.
+                    if (
+                        "rate limit" in exc_str.lower() or "ratelimit" in exc_str.lower()
+                    ) and not streamed_anything and rate_limit_retries < max_rate_limit_retries:
+                        import re as _re
+                        m = _re.search(r"wait\s+(\d+)\s*seconds", exc_str, _re.I)
+                        wait_s = min((int(m.group(1)) if m else 30) + 2, 180)
+                        rate_limit_retries += 1
+                        logger.warning(
+                            "Rate limited by upstream LLM (retry %d/%d). Waiting %ds before retrying the same message.",
+                            rate_limit_retries, max_rate_limit_retries, wait_s,
+                        )
+                        yield (
+                            f"\n\n> ⏳ Rate limit reached on the LLM backend "
+                            f"(retry {rate_limit_retries}/{max_rate_limit_retries}) — waiting {wait_s}s…\n\n"
+                        )
+                        time.sleep(wait_s)
                         continue
                     raise inner_exc
 
