@@ -20,7 +20,7 @@ from orchestrator.config import (
     logger,
     resolve_model_key,
 )
-from orchestrator.models import DescriptorStatus, Segment
+from orchestrator.models import DescriptorStatus, Segment, UpstreamRateLimitError
 from orchestrator.session_store import ConversationStore
 from orchestrator.tool_parser import (
     clean_user_message,
@@ -625,35 +625,45 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                         self.workspace_sync.upload_and_attach_blocking(fpath)
                         redispatch_count += 1
                         continue
-                    # Graceful upstream-failure handling. If nothing has been
-                    # streamed yet, notify the client, wait and retry the
-                    # exact same message instead of failing the request.
-                    # a) rate limits: wait the seconds Onyx reports
+                    # Graceful upstream-failure handling.
+                    # a) rate limits BEFORE any content: raise a typed error so
+                    #    the server responds HTTP 429 + Retry-After and the
+                    #    agentic client applies its own backoff-and-retry.
+                    # b) rate limits MID-STREAM: the SSE response is already
+                    #    committed, so notify in-band, wait, and send a
+                    #    continuation prompt (the Onyx session retains the
+                    #    full context) so the flow resumes instead of dying.
+                    # c) generic Onyx 500s with nothing streamed: retry in-band
+                    #    after a short wait.
                     rate_limited = "rate limit" in exc_str.lower() or "ratelimit" in exc_str.lower()
-                    # b) generic Onyx 500s ("unexpected error occurred")
                     generic_error = "unexpected error occurred" in exc_str.lower()
-                    should_retry = (
-                        (rate_limited or (generic_error and generic_error_retries < 2))
-                        and not streamed_anything
-                        and rate_limit_retries < max_rate_limit_retries
-                    )
-                    if should_retry:
-                        if rate_limited:
-                            import re as _re
-                            m = _re.search(r"wait\s+(\d+)\s*seconds", exc_str, _re.I)
-                            wait_s = min((int(m.group(1)) if m else 30) + 2, 180)
-                            rate_limit_retries += 1
-                            reason = f"rate limit (retry {rate_limit_retries}/{max_rate_limit_retries})"
-                        else:
-                            generic_error_retries += 1
-                            wait_s = 5
-                            reason = f"upstream error (retry {generic_error_retries}/2)"
-                        logger.warning("Upstream failure (%s). Waiting %ds before retrying the same message.", reason, wait_s)
-                        yield f"\n\n> ⏳ {reason.capitalize()} — waiting {wait_s}s…\n\n"
-                        time.sleep(wait_s)
+                    if rate_limited:
+                        import re as _re
+                        m = _re.search(r"wait\s+(\d+)\s*seconds", exc_str, _re.I)
+                        wait_s = min((int(m.group(1)) if m else 30) + 2, 180)
+                        rate_limit_retries += 1
+                        if not streamed_anything:
+                            logger.warning("Rate limited before any output; raising 429 (Retry-After %ds) to client.", wait_s)
+                            raise UpstreamRateLimitError(wait_s, exc_str)
+                        if rate_limit_retries <= max_rate_limit_retries:
+                            logger.warning("Rate limited mid-answer. Waiting %ds, then continuing (retry %d/%d).", wait_s, rate_limit_retries, max_rate_limit_retries)
+                            yield f"\n\n> ⏳ Rate limit hit mid-answer — waiting {wait_s}s, continuing…\n\n"
+                            time.sleep(wait_s)
+                            current_message_to_send = (
+                                "You were interrupted by a rate limit. Continue exactly where you stopped, "
+                                "without repeating content already written."
+                            )
+                            continue
+                    if generic_error and not streamed_anything and generic_error_retries < 2:
+                        generic_error_retries += 1
+                        logger.warning("Generic upstream error (retry %d/2). Waiting 5s before retrying.", generic_error_retries)
+                        yield "\n\n> ⏳ Upstream error — waiting 5s…\n\n"
+                        time.sleep(5)
                         continue
                     raise inner_exc
 
+        except UpstreamRateLimitError:
+            raise
         except Exception as exc:
             logger.error("Streaming message invocation failed: %s", exc)
             raise RuntimeError(f"Onyx invocation error: {exc}") from exc

@@ -152,22 +152,29 @@ class ProxyHandle:
 
 
 def chat_completion(port: int, prompt: str, conversation_id: str, timeout: float = 300.0) -> str:
-    r = requests.post(
-        f"http://127.0.0.1:{port}/v1/chat/completions",
-        json={
-            "model": "claude-sonnet-4.6",
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-        },
-        headers={"X-Conversation-ID": conversation_id},
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    data = r.json()
-    msg = data["choices"][0]["message"]
-    # Agentic tool_call round-trips (write_file etc.): acknowledge so the
-    # proxy can continue; its result arrives on the next GET of the answer.
-    return msg.get("content") or ""
+    deadline = time.time() + timeout
+    while True:
+        r = requests.post(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            json={
+                "model": "claude-sonnet-4.6",
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            },
+            headers={"X-Conversation-ID": conversation_id},
+            timeout=timeout,
+        )
+        if r.status_code == 429:
+            wait = float(r.headers.get("Retry-After", "5"))
+            log(f"429 rate limited; retrying in {wait}s ...")
+            if time.time() + wait > deadline:
+                raise RuntimeError("rate limit retry window exceeded")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        data = r.json()
+        msg = data["choices"][0]["message"]
+        return msg.get("content") or ""
 
 
 def run_openclaude(workspace: str, port: int, prompt: str, model: str) -> str:

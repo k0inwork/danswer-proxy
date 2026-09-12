@@ -10,6 +10,16 @@ from typing import Any, Dict, List, Optional, Set
 from orchestrator.config import logger
 
 
+class UpstreamRateLimitError(RuntimeError):
+    """Raised when the upstream LLM (via Onyx) is rate limited before any
+    content was streamed. The proxy translates this into HTTP 429 with a
+    Retry-After header so agentic clients can apply their own backoff."""
+
+    def __init__(self, wait_s: int, message: str = ""):
+        self.wait_s = max(1, min(int(wait_s), 180))
+        super().__init__(message or f"Upstream rate limited; retry after {self.wait_s}s")
+
+
 class DescriptorStatus(Enum):
     PENDING_UPLOAD = "pending_upload"      # Local file changed/created, not in Onyx yet
     UPLOADED = "uploaded"                  # Uploaded to Onyx, awaiting explicit attachment to project

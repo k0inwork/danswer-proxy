@@ -29,7 +29,7 @@ from orchestrator.config import (
 )
 from orchestrator.core import Orchestrator
 from orchestrator.matrix_manager import MatrixManager
-from orchestrator.models import session_registry
+from orchestrator.models import session_registry, UpstreamRateLimitError
 from orchestrator.tool_parser import (
     StreamingXmlToolParser,
     clean_user_message,
@@ -210,14 +210,37 @@ def chat_completions():
                 },
             )
 
+    # Peek at the first streamed chunk before committing to a 200 SSE
+    # response: if the upstream is rate limited before producing output,
+    # respond HTTP 429 + Retry-After so the agentic client can apply its
+    # own backoff-and-retry instead of the error killing the run.
+    source_gen = orchestrator.process_query(
+        conversation_id=conversation_id,
+        messages=messages,
+        external_tools=external_tools,
+    )
+    try:
+        first_chunk_peek = next(source_gen, None)
+    except UpstreamRateLimitError as rl:
+        logger.warning("Upstream rate limited; responding 429 Retry-After=%ss to client.", rl.wait_s)
+        return Response(
+            json.dumps({
+                "error": {
+                    "message": str(rl),
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                }
+            }, ensure_ascii=False),
+            status=429,
+            mimetype="application/json",
+            headers={"Retry-After": str(rl.wait_s)},
+        )
+
     if stream_requested is False:
         try:
             full_text = "".join(
-                orchestrator.process_query(
-                    conversation_id=conversation_id,
-                    messages=messages,
-                    external_tools=external_tools,
-                )
+                chunk for chunk in ([first_chunk_peek] if first_chunk_peek is not None else [])
+                + list(source_gen)
             )
             tool_invocations = DanswerClient.extract_all_local_tool_invocations(full_text)
 
@@ -323,13 +346,12 @@ def chat_completions():
             parser = StreamingXmlToolParser()
             tool_calls_emitted = False
 
-            for chunk in _with_heartbeats(
-                orchestrator.process_query(
-                    conversation_id=conversation_id,
-                    messages=messages,
-                    external_tools=external_tools,
-                )
-            ):
+            def _chunks():
+                if first_chunk_peek is not None:
+                    yield first_chunk_peek
+                yield from source_gen
+
+            for chunk in _with_heartbeats(_chunks()):
                 text_chunks, tool_calls = parser.feed(chunk)
 
                 for text in text_chunks:
