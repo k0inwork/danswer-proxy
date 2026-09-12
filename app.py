@@ -93,9 +93,22 @@ def main() -> None:
         default=PORT,
         help=f"Port for the HTTP server (default: {PORT})",
     )
+    parser.add_argument(
+        "-e",
+        "--eager-sync",
+        action="store_true",
+        default=None,
+        help="Upload ALL workspace files to the Onyx project at startup "
+        "instead of syncing them on demand when a session reads them "
+        "(default: WORKSPACE_EAGER_SYNC env, off)",
+    )
     args = parser.parse_args()
 
     folder_path = os.path.abspath(args.folder) if args.folder else os.getcwd()
+    if args.eager_sync is not None:
+        os.environ["WORKSPACE_EAGER_SYNC"] = "1" if args.eager_sync else "0"
+        import orchestrator.config as _config
+        _config.WORKSPACE_EAGER_SYNC = args.eager_sync
     run_server(port=args.port, workspace_root=folder_path)
 
 

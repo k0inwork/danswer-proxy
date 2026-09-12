@@ -189,7 +189,7 @@ def run_openclaude(workspace: str, port: int, prompt: str, model: str) -> str:
 
 
 QUESTION_PROMPT = (
-    "The workspace file sample_utils.py is attached to your context. "
+    "Please read the file sample_utils.py from my workspace. "
     "Question: which naming convention is used for variables in that file? "
     "Answer with just the convention name (e.g. camelCase, snake_case, PascalCase)."
 )

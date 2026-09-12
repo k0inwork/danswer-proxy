@@ -9,6 +9,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
+from orchestrator import config
 from orchestrator.config import get_run_logger, logger
 from orchestrator.models import Descriptor, DescriptorStatus
 
@@ -595,11 +596,17 @@ class WorkspaceProjectSync:
                             continue
 
                         canonical = self.canonical_name(full_path, is_dir=False)
+                        already_ready = canonical in self.descriptors and self.descriptors[canonical].status == DescriptorStatus.READY
+                        if not config.WORKSPACE_EAGER_SYNC and not already_ready:
+                            # On-demand mode: only files that were already
+                            # uploaded (and are potentially stale) get
+                            # refreshed; new files upload when first read.
+                            continue
                         try:
                             with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                                 text = f.read()
                             # on_tool_read dedupes by content hash: uploads new
-                            # files at startup and re-uploads changed ones only.
+                            # files (eager mode) and re-uploads changed ones only.
                             self.on_tool_read(full_path, text)
                         except Exception as exc:
                             logger.debug("Could not sync workspace file '%s': %s", fname, exc)

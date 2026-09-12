@@ -13,6 +13,10 @@ DANSWER_URL=... DANSWER_API_TOKEN=... danswer-proxy -f /path/to/workspace
 
 Requires `DANSWER_URL` / `DANSWER_API_TOKEN` in the environment (or a local mock).
 
+Workspace sync modes:
+- **on demand** (default): files upload to Onyx only when a session reads/edits them
+- **eager**: `-e / --eager-sync` flag (or `WORKSPACE_EAGER_SYNC=1`) uploads all workspace files at startup and keeps syncing new ones
+
 ---
 
 Reproducible end-to-end cycle, runnable against the **mock Onyx server** (default, deterministic)

@@ -42,6 +42,14 @@ LOG_MESSAGE_CONTENT = (
     os.getenv("LOG_MESSAGE_CONTENT", "1") == "1"
 )
 
+# Eager workspace sync: upload ALL workspace files to the Onyx project at
+# startup (and continuously as they appear), instead of only on demand when a
+# session actually reads them. Off by default to save uploads; on-demand reads
+# still work via the local_tool read interception.
+WORKSPACE_EAGER_SYNC = (
+    os.getenv("WORKSPACE_EAGER_SYNC", "0") == "1"
+)
+
 GENERAL_PERSONA_ID = 0
 PRIMARY_PERSONA_ID = 4
 
