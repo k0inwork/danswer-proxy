@@ -153,6 +153,63 @@ def chat_completions():
                 },
             )
 
+    # OpenAI-compatible clients in agentic mode (e.g. openclaude) send an
+    # automatic "continue the task" nudge after every answer. The proxy never
+    # leaves work pending between requests (tool rounds complete inside one
+    # request), so these are always spurious: answer locally instead of
+    # launching a full Onyx invocation that would go looking for a task.
+    last_user_msg = next(
+        (m.get("content", "") for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"),
+        "",
+    )
+    if isinstance(last_user_msg, str):
+        cleaned_last = clean_user_message(last_user_msg).strip().lower()
+        is_continuation_nudge = len(cleaned_last) < 300 and (
+            "continue with the task" in cleaned_last
+            or ("resume" in cleaned_last and "thought" in cleaned_last)
+        )
+        if is_continuation_nudge:
+            noop_text = "Nothing is pending — the previous task completed fully."
+            logger.info("Fast-pathing client continuation nudge locally (no Onyx call).")
+            get_run_logger().log_action(
+                category="FAST_PATH",
+                action="CONTINUATION_NUDGE",
+                details={"conversation_id": conversation_id},
+            )
+            if not stream_requested:
+                return Response(
+                    json.dumps({
+                        "id": completion_id,
+                        "object": "chat.completion",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": noop_text},
+                            "finish_reason": "stop",
+                        }],
+                        "conversation_id": conversation_id,
+                    }, ensure_ascii=False),
+                    mimetype="application/json",
+                )
+
+            def generate_noop_stream():
+                chunk_msg = make_completion_chunk(
+                    completion_id=completion_id,
+                    role="assistant",
+                    content=noop_text,
+                    finish_reason="stop",
+                )
+                yield f"data: {json.dumps(chunk_msg, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return Response(
+                generate_noop_stream(),
+                mimetype="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
     if stream_requested is False:
         try:
             full_text = "".join(
