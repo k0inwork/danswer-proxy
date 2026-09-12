@@ -79,11 +79,18 @@ def chat_completions():
     if not messages or not isinstance(messages, list):
         return {"error": "Valid messages list is required"}, 400
 
-    conversation_id = (
+    provided_conversation_id = (
         request.headers.get("X-Conversation-ID")
         or data.get("conversation_id")
-        or "mvp-single-conversation"
     )
+    if provided_conversation_id:
+        conversation_id = provided_conversation_id
+    else:
+        # Stateless mode: clients that do not manage conversations (they
+        # resend full history each request) get a fresh Onyx session per
+        # request. This prevents one poisoned/bloated shared Onyx session
+        # from leaking stale failures into every later turn.
+        conversation_id = f"req-{uuid4().hex[:12]}"
 
     req_model = data.get("model")
     if req_model and isinstance(req_model, str):

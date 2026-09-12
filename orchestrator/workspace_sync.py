@@ -391,11 +391,22 @@ class WorkspaceProjectSync:
         # 4. Write / Create / Edit file operations (write_file, write, create_file, edit_file, modify_file, save_file, replace_in_file)
         elif t_name in {"write_file", "write", "create_file", "edit_file", "modify_file", "save_file", "replace_in_file"}:
             req_path = args.get("file_path") or args.get("path") or args.get("filename") or args.get("target_file")
+            content = args.get("content") or args.get("text") or args.get("file_content") or args.get("code") or ""
+
+            # Guard: refuse the placeholder arguments from the documented
+            # tool-call syntax example (models sometimes echo it verbatim).
+            if content.strip() == "..." and args.get("content") is not None:
+                res_output = "Ignored placeholder tool call (example syntax echoed)."
+                get_run_logger().log_tool_call(
+                    tool_name=tool_name,
+                    arguments=args,
+                    result_summary=res_output,
+                    intercepted=False,
+                )
+                return res_output
             if not req_path:
                 res_output = "Error: File path argument missing for write operation."
             else:
-                content = args.get("content") or args.get("text") or args.get("file_content") or args.get("code") or ""
-
                 # Check if replace_in_file style string replacement is requested
                 old_str = args.get("old_str") or args.get("search") or args.get("find")
                 new_str = args.get("new_str") or args.get("replace")

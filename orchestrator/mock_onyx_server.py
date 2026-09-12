@@ -337,6 +337,11 @@ def send_chat_message():
 
     user_actual_text = user_actual_text.strip()
 
+    # Never echo <local_tool> syntax back (the proxy would execute echoed
+    # example/placeholder tags as real tool calls).
+    import re as _re_tag
+    user_actual_text = _re_tag.sub(r"<local_tool>.*?</local_tool>", "", user_actual_text, flags=_re_tag.S).strip()
+
     # Determine response text based on attached file descriptors or tool call triggers
     requested_file_attached = False
     target_path = "src/auth.py"

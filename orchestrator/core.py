@@ -457,6 +457,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         max_redispatches = MAX_REDISPATCHES
         rate_limit_retries = 0
         max_rate_limit_retries = 5
+        generic_error_retries = 0
 
         try:
             while redispatch_count <= max_redispatches:
@@ -624,26 +625,31 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                         self.workspace_sync.upload_and_attach_blocking(fpath)
                         redispatch_count += 1
                         continue
-                    # Graceful rate-limit handling: Onyx reports e.g.
-                    # "Rate limit of 250000 per 60s exceeded ... Please wait 33
-                    # seconds before retrying." If nothing was streamed yet,
-                    # notify the client, wait the indicated time and retry the
+                    # Graceful upstream-failure handling. If nothing has been
+                    # streamed yet, notify the client, wait and retry the
                     # exact same message instead of failing the request.
-                    if (
-                        "rate limit" in exc_str.lower() or "ratelimit" in exc_str.lower()
-                    ) and not streamed_anything and rate_limit_retries < max_rate_limit_retries:
-                        import re as _re
-                        m = _re.search(r"wait\s+(\d+)\s*seconds", exc_str, _re.I)
-                        wait_s = min((int(m.group(1)) if m else 30) + 2, 180)
-                        rate_limit_retries += 1
-                        logger.warning(
-                            "Rate limited by upstream LLM (retry %d/%d). Waiting %ds before retrying the same message.",
-                            rate_limit_retries, max_rate_limit_retries, wait_s,
-                        )
-                        yield (
-                            f"\n\n> ⏳ Rate limit reached on the LLM backend "
-                            f"(retry {rate_limit_retries}/{max_rate_limit_retries}) — waiting {wait_s}s…\n\n"
-                        )
+                    # a) rate limits: wait the seconds Onyx reports
+                    rate_limited = "rate limit" in exc_str.lower() or "ratelimit" in exc_str.lower()
+                    # b) generic Onyx 500s ("unexpected error occurred")
+                    generic_error = "unexpected error occurred" in exc_str.lower()
+                    should_retry = (
+                        (rate_limited or (generic_error and generic_error_retries < 2))
+                        and not streamed_anything
+                        and rate_limit_retries < max_rate_limit_retries
+                    )
+                    if should_retry:
+                        if rate_limited:
+                            import re as _re
+                            m = _re.search(r"wait\s+(\d+)\s*seconds", exc_str, _re.I)
+                            wait_s = min((int(m.group(1)) if m else 30) + 2, 180)
+                            rate_limit_retries += 1
+                            reason = f"rate limit (retry {rate_limit_retries}/{max_rate_limit_retries})"
+                        else:
+                            generic_error_retries += 1
+                            wait_s = 5
+                            reason = f"upstream error (retry {generic_error_retries}/2)"
+                        logger.warning("Upstream failure (%s). Waiting %ds before retrying the same message.", reason, wait_s)
+                        yield f"\n\n> ⏳ {reason.capitalize()} — waiting {wait_s}s…\n\n"
                         time.sleep(wait_s)
                         continue
                     raise inner_exc
