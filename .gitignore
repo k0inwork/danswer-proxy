@@ -19,3 +19,4 @@ persona_matrix_cache.json
 # harness cycle workspace + proxy log
 harness/.cycle_workspace/
 harness/.cycle_proxy.log
+danswer_proxy.egg-info/
