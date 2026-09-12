@@ -32,6 +32,8 @@ STATE: Dict[str, Any] = {
     },
     "chat_sessions": {},
     "uploaded_files": {},
+    "file_contents": {},
+    "project_instructions": {},
 }
 
 
@@ -55,6 +57,8 @@ def reset_mock_state():
     }
     STATE["chat_sessions"] = {}
     STATE["uploaded_files"] = {}
+    STATE["file_contents"] = {}
+    STATE["project_instructions"] = {}
 
 
 @app.route("/api/me/permissions", methods=["GET"])
@@ -108,6 +112,42 @@ def get_recent_files():
     return jsonify(recent)
 
 
+@app.route("/api/user/projects/file/<file_id>", methods=["GET"])
+def get_user_file_snapshot(file_id: str):
+    """Return a UserFileSnapshot for status polling."""
+    fdict = STATE["uploaded_files"].get(file_id)
+    if not fdict:
+        return jsonify({"detail": "File not found"}), 404
+    return jsonify({
+        "id": file_id,
+        "file_id": file_id,
+        "name": fdict.get("name", "file.txt"),
+        "file_type": fdict.get("type", "plain_text"),
+        "chat_file_type": "plain_text",
+        "status": "COMPLETED",
+        "project_id": None,
+    })
+
+
+@app.route("/api/user/projects/<project_id>/instructions", methods=["GET", "POST"])
+def project_instructions(project_id: str):
+    """Get or upsert project instructions."""
+    if request.method == "GET":
+        return jsonify({"instructions": STATE["project_instructions"].get(project_id)})
+    data = request.get_json(silent=True) or {}
+    STATE["project_instructions"][project_id] = data.get("instructions", "")
+    return jsonify({"instructions": STATE["project_instructions"][project_id]})
+
+
+@app.route("/api/chat/file/<file_id>", methods=["GET"])
+def get_file_blob(file_id: str):
+    """Return the stored blob content of an uploaded file."""
+    content = STATE["file_contents"].get(file_id)
+    if content is None:
+        return jsonify({"detail": "File not found"}), 404
+    return Response(content, mimetype="text/plain")
+
+
 @app.route("/api/user/projects/files/<project_id>", methods=["GET"])
 def get_project_files(project_id: str):
     """Return files associated with a project."""
@@ -139,6 +179,7 @@ def upload_project_file():
 
     file_id = f"file-{uuid.uuid4().hex[:8]}"
     filename = file_obj.filename if file_obj else "file.txt"
+    content_bytes = file_obj.read() if file_obj else b""
 
     file_descriptor = {
         "id": file_id,
@@ -150,6 +191,10 @@ def upload_project_file():
     }
 
     STATE["uploaded_files"][file_id] = file_descriptor
+    try:
+        STATE["file_contents"][file_id] = content_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        STATE["file_contents"][file_id] = ""
 
     if project_id:
         if project_id not in STATE["project_files"]:
@@ -295,7 +340,21 @@ def send_chat_message():
     # Determine response text based on attached file descriptors or tool call triggers
     requested_file_attached = False
     target_path = "src/auth.py"
-    has_read_trigger = ("read file" in user_actual_text.lower() or "read_file" in user_actual_text.lower() or "[TRIGGER_TOOL_READ_FILE]" in message)
+    lower_user = user_actual_text.lower()
+    has_read_trigger = (
+        "[TRIGGER_TOOL_READ_FILE]" in message
+        or "read the file" in lower_user
+        or "read file" in lower_user
+    )
+
+    import re as _re
+    write_match = _re.search(r"\[TRIGGER_TOOL_WRITE_FILE:([^\]]+)\]", message)
+    has_write_trigger = write_match is not None
+
+    # Guard: when the proxy redispatches after executing local tools, return a
+    # final answer instead of re-triggering tool calls (avoids loops).
+    tool_results_returned = "[LOCAL TOOL EXECUTION RESULTS]" in message
+
     if has_read_trigger:
         for word in user_actual_text.split():
             clean_w = word.strip(" '\"\t\n,")
@@ -310,7 +369,23 @@ def send_chat_message():
                     requested_file_attached = True
                     break
 
-    if has_read_trigger and not requested_file_attached:
+    if has_read_trigger and requested_file_attached:
+        attached_info = []
+        for fd in file_descriptors:
+            fid = fd.get("id") or fd.get("file_id")
+            fname = fd.get("name") or fid
+            attached_info.append(f"{fname} ({fid})")
+        files_str = ", ".join(attached_info)
+        response_text = f"Mock Onyx answer to: {user_actual_text} [Attached files: {files_str}]"
+    elif tool_results_returned:
+        response_text = f"Mock Onyx answer to: {user_actual_text} [tool executed successfully]"
+    elif has_write_trigger:
+        write_path = write_match.group(1).strip() if write_match else "updated_file.txt"
+        response_text = (
+            '<local_tool><name>write_file</name>'
+            f'<arguments>{{"file_path": "{write_path}", "content": "[UPDATED_BY_MOCK_WORKSPACE]"}}</arguments></local_tool>'
+        )
+    elif has_read_trigger and not requested_file_attached:
         response_text = f'<local_tool><name>read_file</name><arguments>{{"file_path": "{target_path}"}}</arguments></local_tool>'
     elif file_descriptors:
         attached_info = []

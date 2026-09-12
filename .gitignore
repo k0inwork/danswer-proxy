@@ -15,3 +15,7 @@ __pycache__/
 .pytest_cache/
 workspace_sync_cache.json
 persona_matrix_cache.json
+
+# harness cycle workspace + proxy log
+harness/.cycle_workspace/
+harness/.cycle_proxy.log

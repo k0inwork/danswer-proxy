@@ -21,6 +21,11 @@ class DescriptorStatus(Enum):
 class Descriptor:
     canonical_name: str
     file_path: str
+    # Onyx UserFileSnapshot carries two identifiers:
+    #   user_file_id -> snapshot["id"] (UUID): used by project link/unlink/delete/status endpoints
+    #   file_id      -> snapshot["file_id"] (blob string): required as file_descriptors[].id
+    #                  in /api/chat/send-chat-message
+    user_file_id: Optional[str] = None
     file_id: Optional[str] = None
     file_type: str = "plain_text"
     status: DescriptorStatus = DescriptorStatus.PENDING_UPLOAD
@@ -28,11 +33,14 @@ class Descriptor:
     error_message: Optional[str] = None
 
     def to_onyx_dict(self) -> Dict[str, Any]:
-        return {
+        fd: Dict[str, Any] = {
             "id": self.file_id or "",
             "type": self.file_type,
             "name": self.canonical_name,
         }
+        if self.user_file_id:
+            fd["user_file_id"] = self.user_file_id
+        return fd
 
 
 class SessionRegistry:

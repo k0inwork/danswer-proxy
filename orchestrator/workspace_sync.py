@@ -37,22 +37,24 @@ class WorkspaceProjectSync:
         self._watcher_thread: Optional[threading.Thread] = None
         self._stop_watcher = threading.Event()
         self._lock = threading.Lock()
+        self._instructions_pushed = False
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="onyx_sync")
 
     # ------------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------------
 
-    def _on_upload_complete(self, canonical: str, file_id: str, file_type: str) -> None:
-        """Callback 1: Triggered strictly when Onyx returns valid file_id from upload_project_file."""
+    def _on_upload_complete(self, canonical: str, file_id: str, file_type: str, user_file_id: str = "") -> None:
+        """Callback 1: Triggered strictly when Onyx returns a valid upload snapshot."""
         with self._lock:
             desc = self.descriptors.get(canonical)
             if not desc:
                 return
             desc.file_id = file_id
+            desc.user_file_id = user_file_id or None
             desc.file_type = file_type
             desc.status = DescriptorStatus.UPLOADED
-            logger.info("CALLBACK [UPLOADED]: '%s' assigned ID=%s", canonical, file_id)
+            logger.info("CALLBACK [UPLOADED]: '%s' assigned ID=%s (user_file_id=%s)", canonical, file_id, user_file_id or "-")
 
         get_run_logger().log_file_upload(
             file_path=desc.file_path,
@@ -120,7 +122,7 @@ class WorkspaceProjectSync:
             with self._lock:
                 desc = self.descriptors.get(canonical)
 
-            existing_file_id = getattr(desc, 'file_id', None)
+            existing_file_id = getattr(desc, 'user_file_id', None) or getattr(desc, 'file_id', None)
             project_id = getattr(desc, 'project_id', None) or self.project_id
 
             if existing_file_id and project_id:
@@ -135,14 +137,16 @@ class WorkspaceProjectSync:
                 content_bytes=payload_bytes,
             )
 
+            # UserFileSnapshot: "id" = user-file UUID, "file_id" = blob string
+            uf_id = str(res.get("id") or "")
             fid = str(res.get("file_id") or res.get("id") or "")
             ftype = res.get("file_type", "plain_text")
 
-            if fid and hasattr(self.client, "wait_for_file_processing"):
-                self.client.wait_for_file_processing(fid)
+            if (fid or uf_id) and hasattr(self.client, "wait_for_file_processing"):
+                self.client.wait_for_file_processing(fid, user_file_id=uf_id)
 
             # Fire Uploaded Callback
-            self._on_upload_complete(canonical, fid, ftype)
+            self._on_upload_complete(canonical, fid, ftype, user_file_id=uf_id)
         except Exception as exc:
             self._on_sync_failure(canonical, "UPLOAD", exc)
 
@@ -241,8 +245,8 @@ class WorkspaceProjectSync:
                 desc.file_path = file_path
 
         try:
-            # Check and cleanup existing file if present
-            existing_fid = getattr(desc, 'file_id', None)
+            # Check and cleanup existing file if present (prefer user-file UUID)
+            existing_fid = getattr(desc, 'user_file_id', None) or getattr(desc, 'file_id', None)
             if existing_fid and self.project_id:
                 try:
                     self.client.delete_project_file(existing_fid, self.project_id)
@@ -255,16 +259,19 @@ class WorkspaceProjectSync:
                 filename=canonical,
                 content_bytes=full_payload,
             )
+            # UserFileSnapshot: "id" = user-file UUID, "file_id" = blob string
+            uf_id = str(res.get("id") or "")
             fid = str(res.get("file_id") or res.get("id") or "")
             ftype = res.get("file_type", "plain_text")
 
             # 3. Wait for file processing
-            if fid and hasattr(self.client, "wait_for_file_processing"):
-                self.client.wait_for_file_processing(fid)
+            if (fid or uf_id) and hasattr(self.client, "wait_for_file_processing"):
+                self.client.wait_for_file_processing(fid, user_file_id=uf_id)
 
             # Update descriptor state directly without launching async attach task
             with self._lock:
                 desc.file_id = fid
+                desc.user_file_id = uf_id or None
                 desc.file_type = ftype
                 desc.status = DescriptorStatus.UPLOADED
 
@@ -494,10 +501,12 @@ class WorkspaceProjectSync:
                     if isinstance(f, dict) and f.get("name"):
                         cname = f["name"]
                         fid = str(f.get("file_id") or f.get("id") or "")
+                        uf_id = str(f.get("id") or "")
                         ftype = f.get("type") or "plain_text"
                         self.descriptors[cname] = Descriptor(
                             canonical_name=cname,
                             file_path="",
+                            user_file_id=uf_id or None,
                             file_id=fid,
                             file_type=ftype,
                             status=DescriptorStatus.READY,
@@ -522,13 +531,14 @@ class WorkspaceProjectSync:
                 for cname, flist in file_groups.items():
                     keep_f = flist[-1]
                     fid = str(keep_f.get("file_id") or keep_f.get("id") or "")
+                    uf_id = str(keep_f.get("id") or "")
                     ftype = keep_f.get("type") or "plain_text"
 
                     if len(flist) > 1:
                         for dup_f in flist[:-1]:
-                            dup_fid = str(dup_f.get("file_id") or dup_f.get("id") or "")
-                            if dup_fid and dup_fid != fid:
-                                logger.info("Cleaning up duplicate project file '%s' (file_id=%s)", cname, dup_fid)
+                            dup_fid = str(dup_f.get("id") or dup_f.get("file_id") or "")
+                            if dup_fid and dup_fid != uf_id:
+                                logger.info("Cleaning up duplicate project file '%s' (user_file_id=%s)", cname, dup_fid)
                                 try:
                                     self.client.delete_project_file(dup_fid, self.project_id)
                                 except Exception as del_err:
@@ -538,12 +548,13 @@ class WorkspaceProjectSync:
                         self.descriptors[cname] = Descriptor(
                             canonical_name=cname,
                             file_path="",
+                            user_file_id=uf_id or None,
                             file_id=fid,
                             file_type=ftype,
                             status=DescriptorStatus.READY,
                             project_id=self.project_id
                         )
-                        logger.info("Registered active project file descriptor '%s' (file_id=%s)", cname, fid)
+                        logger.info("Registered active project file descriptor '%s' (file_id=%s user_file_id=%s)", cname, fid, uf_id or "-")
 
             top_folder_cname = "TOP_FOLDER_" + self.sanitize_path(self.root) + ".txt"
             top_desc = self.descriptors.get(top_folder_cname)
@@ -556,6 +567,17 @@ class WorkspaceProjectSync:
             self.start_background_watcher()
         except Exception as exc:
             logger.warning("Could not complete project initialization: %s", exc)
+
+    def update_project_instructions(self, instructions: str) -> None:
+        """Push system-level instructions into the Onyx project (once per run).
+        All chat sessions created with this project_id inherit them, which is
+        the proper system-context channel (no user-message injection)."""
+        if self._instructions_pushed or not self.project_id or not instructions:
+            return
+        if hasattr(self.client, "set_project_instructions"):
+            self._instructions_pushed = bool(
+                self.client.set_project_instructions(self.project_id, instructions)
+            )
 
     def sync_root_files(self) -> None:
         if not os.path.isdir(self.root):
@@ -573,13 +595,14 @@ class WorkspaceProjectSync:
                             continue
 
                         canonical = self.canonical_name(full_path, is_dir=False)
-                        if canonical in self.descriptors and self.descriptors[canonical].status == DescriptorStatus.READY:
-                            try:
-                                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                                    text = f.read()
-                                self.on_tool_read(full_path, text)
-                            except Exception as exc:
-                                logger.debug("Could not auto-sync existing project file '%s': %s", fname, exc)
+                        try:
+                            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                text = f.read()
+                            # on_tool_read dedupes by content hash: uploads new
+                            # files at startup and re-uploads changed ones only.
+                            self.on_tool_read(full_path, text)
+                        except Exception as exc:
+                            logger.debug("Could not sync workspace file '%s': %s", fname, exc)
         except Exception as exc:
             logger.warning("Error syncing existing workspace files: %s", exc)
 
@@ -753,12 +776,11 @@ class WorkspaceProjectSync:
 
         lines.extend([
             "",
-            "OPERATIONAL RULES FOR MODEL:",
-            "1. When asked about project structure or file locations, consult the `TOP_FOLDER_...` attached document if present.",
-            "2. If a local file or subdirectory is already attached as a project document descriptor (e.g. starting with `FILE_` or `FOLDER_`), refer to and read it directly from your attached context/documents. Do NOT call local filesystem tools or make redundant read requests for files already present in your context.",
-            "3. If a file or directory is NOT already attached to your context, emit the appropriate `<local_tool>` tag (e.g. `read_file`, `list_dir`, `grep_search`) immediately to inspect or read it. Do NOT refuse or state that you lack file access.",
-            "4. All attached documents represent live, real-time code from the user's workspace.",
-            "5. Do NOT state that you lack file access or spawn subagents to re-read files that are already attached in your descriptors.",
-            "</workspace_context>\n"
+            "Notes:",
+            "1. For questions about project structure or file locations, the `TOP_FOLDER_...` attached document holds the current directory map.",
+            "2. Files listed above as attached documents contain their live contents; use them directly.",
+            "3. Files not listed above can be inspected on request through the workspace tool bridge (<local_tool> read_file / list_dir / grep_search).",
+            "4. Attached documents represent live, real-time code from the user's workspace.",
+            "</workspace_context>",
         ])
         return "\n".join(lines)

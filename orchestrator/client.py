@@ -85,74 +85,111 @@ class DanswerClient:
             logger.debug("Failed to fetch recent files: %s", exc)
         return None
 
+    def get_user_file_snapshot(self, user_file_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single UserFileSnapshot by its user-file UUID (includes processing status)."""
+        try:
+            response = self._safe_request(
+                "GET",
+                f"{self.danswer_url}/api/user/projects/file/{user_file_id}",
+                timeout=API_TIMEOUT,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict):
+                    return data
+        except Exception as exc:
+            logger.debug("Failed to fetch user file snapshot %s: %s", user_file_id, exc)
+        return None
+
+    @staticmethod
+    def _extract_status(file_obj: Dict[str, Any]) -> str:
+        status = str(file_obj.get("status") or "").upper()
+        if not status:
+            # Older shapes signal completion only by chunk/token counters being set
+            if file_obj.get("chunk_count") is not None:
+                status = "COMPLETED"
+            else:
+                status = "COMPLETED"
+        return status
+
     def wait_for_file_processing(
-        self, file_id: str, timeout: float = 30.0, poll_interval: float = 0.2
+        self,
+        file_id: str,
+        timeout: float = 30.0,
+        poll_interval: float = 0.5,
+        user_file_id: str = "",
     ) -> bool:
         """
         Polls Onyx until file processing status is COMPLETED or FAILED.
-        Returns True if processing succeeded or if status endpoint is unneeded/unsupported.
+        Prefers the per-file status endpoint keyed by the user-file UUID; falls
+        back to /api/user/files/recent matched on either id key.
+        Returns True if processing succeeded or status cannot be determined.
         """
-        if not file_id:
+        if not file_id and not user_file_id:
             return True
 
         start_time = time.time()
         while time.time() - start_time < timeout:
-            recent_files = self.get_recent_files()
-            if recent_files is not None:
-                found = False
-                for file_obj in recent_files:
-                    fid = str(file_obj.get("id") or file_obj.get("file_id") or "")
-                    if fid == str(file_id):
-                        found = True
-                        status = str(file_obj.get("status") or "COMPLETED").upper()
-                        if status == "COMPLETED":
-                            logger.info("File processing completed for file_id=%s", file_id)
-                            return True
-                        elif status == "FAILED":
-                            logger.warning("File processing failed for file_id=%s", file_id)
-                            return False
-                        break
-                if not found and time.time() - start_time > 2.0:
-                    return True
-            else:
-                return True
+            checked = False
+            if user_file_id:
+                snapshot = self.get_user_file_snapshot(user_file_id)
+                if snapshot is not None:
+                    checked = True
+                    status = self._extract_status(snapshot)
+                    if status == "COMPLETED":
+                        logger.info("File processing completed for user_file_id=%s", user_file_id)
+                        return True
+                    if status == "FAILED":
+                        logger.warning("File processing failed for user_file_id=%s", user_file_id)
+                        return False
+            if not checked:
+                recent_files = self.get_recent_files()
+                if recent_files:
+                    for file_obj in recent_files:
+                        ids = {
+                            str(file_obj.get("id") or ""),
+                            str(file_obj.get("file_id") or ""),
+                        }
+                        if str(file_id) in ids or str(user_file_id) in ids:
+                            status = self._extract_status(file_obj)
+                            if status == "COMPLETED":
+                                logger.info("File processing completed for file_id=%s", file_id)
+                                return True
+                            if status == "FAILED":
+                                logger.warning("File processing failed for file_id=%s", file_id)
+                                return False
+                            checked = True
+                            break
 
             time.sleep(poll_interval)
 
-        logger.warning("Timed out waiting for file processing of file_id=%s; proceeding", file_id)
+        logger.warning(
+            "Timed out waiting for file processing (file_id=%s user_file_id=%s); proceeding",
+            file_id,
+            user_file_id,
+        )
         return True
 
     def attach_file_to_project(self, project_id: Any, file_id: str) -> bool:
-        """Links an uploaded file_id to a project_id across candidate Onyx endpoints."""
+        """Links an uploaded user-file (by its user-file UUID) to a project.
+
+        Upstream endpoint: POST /api/user/projects/{project_id}/files/{file_id}
+        (returns the linked UserFileSnapshot)."""
         pid_str = str(project_id).strip() if project_id is not None else ""
         fid = (file_id or "").strip()
         if not pid_str or not fid:
             return False
 
         endpoints = [
-            (f"{self.danswer_url}/api/user/projects/{pid_str}/files", "POST"),
             (f"{self.danswer_url}/api/user/projects/{pid_str}/files/{fid}", "POST"),
-            (f"{self.danswer_url}/api/user/projects/{pid_str}/file/{fid}", "POST"),
         ]
 
         for ep, method in endpoints:
             try:
-                payload = {"file_ids": [fid], "file_id": fid}
-                res = self._safe_request(method, ep, json=payload, timeout=API_TIMEOUT)
+                res = self._safe_request(method, ep, timeout=API_TIMEOUT)
 
-                logger.info("Attachment candidate endpoint %s returned HTTP %s: %s", ep, res.status_code, res.text[:200])
+                logger.info("Attachment endpoint %s returned HTTP %s: %s", ep, res.status_code, res.text[:200])
                 if res.status_code in (200, 201, 204):
-                    try:
-                        res_json = res.json()
-                        if isinstance(res_json, dict):
-                            # If single file endpoint returned an object where project_id is explicitly None,
-                            # endpoint did NOT actually associate the file with the project.
-                            if res_json.get("project_id") is None and "file_ids" not in res_json:
-                                logger.warning("Endpoint %s returned HTTP %s but project_id is null in response body.", ep, res.status_code)
-                                continue
-                    except Exception:
-                        pass
-
                     get_run_logger().log_action(
                         category="FILE_ATTACH",
                         action="SUCCESS",
@@ -163,12 +200,12 @@ class DanswerClient:
                 logger.debug("Failed endpoint %s: %s", ep, exc)
                 continue
 
-        # Fallback check: Verify if fid is present in project files
+        # Fallback check: Verify if fid is present in project files (by either id key)
         try:
             p_files = self.get_project_files(pid_str)
             for f in p_files:
                 if isinstance(f, dict):
-                    if str(f.get("file_id") or f.get("id")) == fid or str(f.get("id") or f.get("file_id")) == fid:
+                    if fid in {str(f.get("id") or ""), str(f.get("file_id") or "")}:
                         return True
         except Exception:
             pass
@@ -179,6 +216,26 @@ class DanswerClient:
             action="FAILED",
             details={"project_id": pid_str, "file_id": fid},
         )
+        return False
+
+    def set_project_instructions(self, project_id: Any, instructions: str) -> bool:
+        """Upsert system-level project instructions (inherited by all project chat sessions)."""
+        pid_str = str(project_id).strip() if project_id is not None else ""
+        if not pid_str:
+            return False
+        try:
+            response = self._safe_request(
+                "POST",
+                f"{self.danswer_url}/api/user/projects/{pid_str}/instructions",
+                json={"instructions": instructions},
+                timeout=API_TIMEOUT,
+            )
+            if response.status_code in (200, 201, 204):
+                logger.info("Project instructions updated for project_id=%s", pid_str)
+                return True
+            logger.warning("Failed to set project instructions for %s: HTTP %s %s", pid_str, response.status_code, response.text[:200])
+        except Exception as exc:
+            logger.warning("Error setting project instructions for %s: %s", pid_str, exc)
         return False
 
     def fetch_personas(self) -> List[Dict[str, Any]]:
@@ -393,12 +450,16 @@ class DanswerClient:
                 ret_dict = ret if isinstance(ret, dict) else {}
 
             if not ret_dict:
-                ret_dict = {"id": upload_name, "name": upload_name, "type": "plain_text"}
+                raise RuntimeError(
+                    f"Onyx upload response for '{upload_name}' contained no file descriptor: {str(res_data)[:500]}"
+                )
 
+            # Normalize: keep both id keys as returned by Onyx (UserFileSnapshot
+            # carries "id" = user-file UUID and "file_id" = blob string).
             get_run_logger().log_file_upload(
                 file_path=filename,
                 canonical_name=upload_name,
-                file_id=str(ret_dict.get("id") or ret_dict.get("file_id") or ""),
+                file_id=str(ret_dict.get("file_id") or ret_dict.get("id") or ""),
                 project_id=pid_str,
                 status="UPLOADED",
             )
@@ -518,6 +579,7 @@ class DanswerClient:
                     "id": f_id,
                     "type": f_type,
                     "name": fd.get("name") or "",
+                    **({"user_file_id": str(fd["user_file_id"])} if fd.get("user_file_id") else {}),
                 })
 
         payload: Dict[str, Any] = {

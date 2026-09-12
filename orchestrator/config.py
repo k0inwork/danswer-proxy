@@ -43,7 +43,12 @@ LOG_MESSAGE_CONTENT = (
 )
 
 GENERAL_PERSONA_ID = 0
-PRIMARY_PERSONA_ID = 0
+PRIMARY_PERSONA_ID = 4
+
+# Persona auto-switcher (detect_mode + segment compaction). Disabled by
+# default: the routing round-trip adds latency and the switch can drop the
+# local-tool instructions. Set PERSONA_SWITCHER=1 to enable.
+ENABLE_PERSONA_SWITCHER = os.getenv("PERSONA_SWITCHER", "0") == "1"
 
 # model_id -> (display_name, provider, version_for_api)
 MODELS = {

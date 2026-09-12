@@ -211,7 +211,7 @@ class TestBlockingFileSyncAndRedispatch(unittest.TestCase):
 
         # Test with empty tools list
         formatted_empty = orchestrator.format_external_tools_for_danswer([])
-        self.assertIn("[SYSTEM INSTRUCTION: LOCAL TOOL EXECUTION INTERFACE]", formatted_empty)
+        self.assertIn("[LOCAL TOOL EXECUTION INTERFACE]", formatted_empty)
         self.assertIn("- Tool: read_file", formatted_empty)
         self.assertIn("- Tool: list_dir", formatted_empty)
         self.assertIn("- Tool: grep_search", formatted_empty)
@@ -219,7 +219,7 @@ class TestBlockingFileSyncAndRedispatch(unittest.TestCase):
 
         # Test with None
         formatted_none = orchestrator.format_external_tools_for_danswer(None)
-        self.assertIn("[SYSTEM INSTRUCTION: LOCAL TOOL EXECUTION INTERFACE]", formatted_none)
+        self.assertIn("[LOCAL TOOL EXECUTION INTERFACE]", formatted_none)
         self.assertIn("- Tool: read_file", formatted_none)
 
         # Test with external custom tool

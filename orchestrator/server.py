@@ -16,6 +16,7 @@ from orchestrator.config import (
     CACHE_FILE,
     DANSWER_API_TOKEN,
     DANSWER_URL,
+    ENABLE_PERSONA_SWITCHER,
     FORCE_REFRESH_MATRIX,
     LOG_MESSAGE_CONTENT,
     MODELS,
@@ -429,10 +430,14 @@ def init_orchestrator(
 
     cleanup_stale_llmproxy_sessions(client)
 
-    matrix_manager = MatrixManager(client=client, cache_file=CACHE_FILE)
-    routing_manifest, tool_ids = matrix_manager.get_or_build_matrix(
-        force_refresh=FORCE_REFRESH_MATRIX
-    )
+    if ENABLE_PERSONA_SWITCHER:
+        matrix_manager = MatrixManager(client=client, cache_file=CACHE_FILE)
+        routing_manifest, tool_ids = matrix_manager.get_or_build_matrix(
+            force_refresh=FORCE_REFRESH_MATRIX
+        )
+    else:
+        # Persona routing disabled: skip matrix construction entirely.
+        routing_manifest, tool_ids = "{}", None
 
     workspace_sync = WorkspaceProjectSync(workspace_root=root_path, client=client)
     workspace_sync.initialize_project()
@@ -444,7 +449,11 @@ def init_orchestrator(
         workspace_sync=workspace_sync,
     )
 
-    logger.info("Loaded %s global tool IDs", len(tool_ids))
+    logger.info(
+        "Loaded %s global tool IDs (persona_switcher=%s)",
+        len(tool_ids or []),
+        "on" if ENABLE_PERSONA_SWITCHER else "off",
+    )
     return client, orchestrator
 
 

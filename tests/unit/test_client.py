@@ -85,8 +85,7 @@ def test_attach_file_to_project_success():
 
     client._safe_request.assert_called_once_with(
         "POST",
-        "http://localhost:8080/api/user/projects/63/files",
-        json={"file_ids": ["fid-abc"], "file_id": "fid-abc"},
+        "http://localhost:8080/api/user/projects/63/files/fid-abc",
         timeout=API_TIMEOUT,
     )
 
@@ -99,22 +98,6 @@ def test_attach_file_to_project_failure_returns_false():
     client._safe_request.return_value = mock_resp
 
     result = client.attach_file_to_project(project_id="63", file_id="fid-abc")
-    assert result is False
-
-
-def test_attach_file_to_project_skips_null_project_id_response():
-    client = DanswerClient(danswer_url="http://localhost:8080/", api_token="test-token")
-    client._safe_request = MagicMock()
-
-    # Candidate 1 & 2 return HTTP 200 with project_id = None
-    null_proj_resp = MagicMock()
-    null_proj_resp.status_code = 200
-    null_proj_resp.json.return_value = {"id": "user-file-uuid", "file_id": "proj-file-uuid", "project_id": None}
-
-    client._safe_request.return_value = null_proj_resp
-    client.get_project_files = MagicMock(return_value=[])
-
-    result = client.attach_file_to_project(project_id="63", file_id="proj-file-uuid")
     assert result is False
 
 
