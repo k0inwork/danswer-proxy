@@ -501,6 +501,19 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                 # workspace disk so the watcher syncs them to Onyx.
                                 if True:
                                     intercepted_batch = True
+
+                                    # A) Stream the model's preamble (text
+                                    # before the first tool tag) to the client
+                                    # right away instead of swallowing it with
+                                    # the intercept — keeps the client's stream
+                                    # alive and shows intent.
+                                    first_raw = next((t.get("raw") for t in all_tools if t.get("raw")), None)
+                                    if first_raw:
+                                        preamble = buffered_output.split(first_raw, 1)[0].strip()
+                                        if preamble:
+                                            logger.info("[AUTO-GROUNDING INTERCEPT] Streaming preamble (%d chars) before tool execution.", len(preamble))
+                                            yield preamble
+
                                     logger.info("[AUTO-GROUNDING INTERCEPT] Intercepted batch of %d tool call(s) containing read/grounding tool.", len(all_tools))
                                     get_run_logger().log_tool_call(
                                         tool_name="[AUTO_GROUNDING_BATCH]",

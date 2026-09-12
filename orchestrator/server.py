@@ -216,6 +216,42 @@ def chat_completions():
             logger.exception("Non-streaming request failed")
             return {"error": str(exc), "conversation_id": conversation_id}, 500
 
+    def _with_heartbeats(source_gen, interval: float = 10.0):
+        """Wrap a text-chunk generator so the SSE stream emits an SSE comment
+        keep-alive whenever nothing has been produced for `interval` seconds.
+        Keeps clients (e.g. openclaude) from timing out during long Onyx calls
+        and blocking workspace syncs. SSE comments are ignored by OpenAI
+        clients and never reach the model or the chat content."""
+        import queue as _queue
+        import threading as _threading
+
+        q: _queue.Queue = _queue.Queue()
+        _DONE = object()
+
+        def _pump():
+            try:
+                for chunk in source_gen:
+                    q.put(chunk)
+            except Exception as exc:
+                q.put(exc)
+            finally:
+                q.put(_DONE)
+
+        pump_thread = _threading.Thread(target=_pump, daemon=True, name="sse-heartbeat-pump")
+        pump_thread.start()
+
+        while True:
+            try:
+                item = q.get(timeout=interval)
+            except _queue.Empty:
+                yield ": keep-alive\n\n"
+                continue
+            if item is _DONE:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
     @stream_with_context
     def generate_sse():
         first_chunk = True
@@ -223,10 +259,12 @@ def chat_completions():
             parser = StreamingXmlToolParser()
             tool_calls_emitted = False
 
-            for chunk in orchestrator.process_query(
-                conversation_id=conversation_id,
-                messages=messages,
-                external_tools=external_tools,
+            for chunk in _with_heartbeats(
+                orchestrator.process_query(
+                    conversation_id=conversation_id,
+                    messages=messages,
+                    external_tools=external_tools,
+                )
             ):
                 text_chunks, tool_calls = parser.feed(chunk)
 
