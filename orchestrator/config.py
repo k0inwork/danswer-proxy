@@ -50,6 +50,10 @@ WORKSPACE_EAGER_SYNC = (
     os.getenv("WORKSPACE_EAGER_SYNC", "0") == "1"
 )
 
+# Max intercept-and-redispatch tool rounds per client request. Each round the
+# model's local_tool calls are executed and the results are sent back to Onyx.
+MAX_REDISPATCHES = int(os.getenv("MAX_REDISPATCHES", "6"))
+
 GENERAL_PERSONA_ID = 0
 PRIMARY_PERSONA_ID = 4
 

@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from orchestrator.client import DanswerClient
 from orchestrator.config import (
     ENABLE_PERSONA_SWITCHER,
+    MAX_REDISPATCHES,
     MODELS,
     PERSONAS,
     PRIMARY_PERSONA_ID,
@@ -452,7 +453,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
 
         current_message_to_send = message_for_persona
         redispatch_count = 0
-        max_redispatches = 3
+        max_redispatches = MAX_REDISPATCHES
 
         try:
             while redispatch_count <= max_redispatches:
@@ -480,7 +481,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         turn_chunks.append(chunk)
 
                         # Check for tool call intercept opportunity before streaming to client
-                        if "<local_tool>" in buffered_output and "</local_tool>" in buffered_output and not streamed_anything and self.workspace_sync and redispatch_count < max_redispatches:
+                        if "<local_tool>" in buffered_output and "</local_tool>" in buffered_output and self.workspace_sync and redispatch_count < max_redispatches:
                             all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
                             if all_tools:
                                 # Detect if any read/grounding tool is present in the invocation batch
@@ -508,7 +509,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                     # the intercept — keeps the client's stream
                                     # alive and shows intent.
                                     first_raw = next((t.get("raw") for t in all_tools if t.get("raw")), None)
-                                    if first_raw:
+                                    if first_raw and not streamed_anything:
                                         preamble = buffered_output.split(first_raw, 1)[0].strip()
                                         if preamble:
                                             logger.info("[AUTO-GROUNDING INTERCEPT] Streaming preamble (%d chars) before tool execution.", len(preamble))
@@ -570,11 +571,16 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                     redispatch_count += 1
                                     break
 
-                        # Buffer stream chunks while checking if a tool call tag is being streamed or if a brief preamble is present (< 120 chars)
+                        # Buffer the stream while a tool call tag is being
+                        # streamed (so it can still be intercepted even after
+                        # other content was streamed) or while a brief preamble
+                        # precedes the first tag (< 120 chars, nothing streamed yet).
+                        in_uncompleted_tool = "<local_tool>" in buffered_output and "</local_tool>" not in buffered_output
+                        if in_uncompleted_tool:
+                            continue
                         if not streamed_anything and self.workspace_sync and redispatch_count < max_redispatches:
-                            in_uncompleted_tool = "<local_tool>" in buffered_output and "</local_tool>" not in buffered_output
                             no_tool_yet_short_buffer = "<local_tool>" not in buffered_output and len(buffered_output) < 120
-                            if in_uncompleted_tool or no_tool_yet_short_buffer:
+                            if no_tool_yet_short_buffer:
                                 continue
 
                         for c in turn_chunks:
