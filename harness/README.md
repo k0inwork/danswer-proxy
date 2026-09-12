@@ -1,5 +1,20 @@
 # Harness — proxy verification cycle
 
+## Run the proxy from anywhere (pipx)
+
+```bash
+# one-off run straight from the repo:
+pipx run git+https://github.com/k0inwork/danswer-proxy.git -f /path/to/workspace -p 8080
+
+# or install persistently:
+pipx install git+https://github.com/k0inwork/danswer-proxy.git
+DANSWER_URL=... DANSWER_API_TOKEN=... danswer-proxy -f /path/to/workspace
+```
+
+Requires `DANSWER_URL` / `DANSWER_API_TOKEN` in the environment (or a local mock).
+
+---
+
 Reproducible end-to-end cycle, runnable against the **mock Onyx server** (default, deterministic)
 or the **real Onyx suite**:
 
