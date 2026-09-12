@@ -55,7 +55,14 @@ WORKSPACE_EAGER_SYNC = (
 MAX_REDISPATCHES = int(os.getenv("MAX_REDISPATCHES", "6"))
 
 GENERAL_PERSONA_ID = 0
-PRIMARY_PERSONA_ID = 4
+# Onyx precedence rule (upstream resolve_context_user_files): a CUSTOM persona
+# injects its own system prompt (e.g. an "analyst" instruction that fights the
+# proxy's local_tool protocol) and suppresses Onyx's automatic project-file
+# injection. Only the DEFAULT persona (0) inside a project auto-loads all
+# project files as chat context. Descriptors explicitly attached by the proxy
+# reach the model under any persona, but persona 0 removes the conflicting
+# instructions and makes Onyx natively see every synced workspace file.
+PRIMARY_PERSONA_ID = 0
 
 # Persona auto-switcher (detect_mode + segment compaction). Disabled by
 # default: the routing round-trip adds latency and the switch can drop the
