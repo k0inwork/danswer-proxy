@@ -69,6 +69,26 @@ class ConversationStore:
             )
             return segment
 
+    def discard_active(self, conversation_id: str, reason: str = "discarded") -> Optional[Segment]:
+        """Mark the active segment CLOSED without touching Onyx.
+
+        Used when the underlying Onyx session is already gone (e.g. deleted
+        after an unrecoverable request failure) so the next turn of this
+        conversation creates a fresh session instead of messaging a dead one."""
+        with self._lock:
+            segments = self._segments.get(conversation_id, [])
+            if not segments:
+                return None
+            segment = segments[-1]
+            segment.status = "CLOSED"
+            log_session_event(
+                event="DISCARDED_SEGMENT",
+                conversation_id=conversation_id,
+                session_id=segment.session_id,
+                persona_id=segment.persona_id,
+            )
+            return segment
+
     def close_active(self, conversation_id: str, compaction: str) -> Optional[Segment]:
         with self._lock:
             segments = self._segments.get(conversation_id, [])

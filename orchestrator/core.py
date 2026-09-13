@@ -768,6 +768,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                 self.client.delete_chat_session(active.session_id, kind="rate_limited_cleanup")
             except Exception:
                 pass
+            self.sessions.discard_active(conversation_id, reason="rate_limited")
             raise
         except Exception as exc:
             logger.error("Streaming message invocation failed: %s", exc)
@@ -776,6 +777,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                 self.client.delete_chat_session(active.session_id, kind="failed_cleanup")
             except Exception:
                 pass
+            self.sessions.discard_active(conversation_id, reason="failed")
             raise RuntimeError(f"Onyx invocation error: {exc}") from exc
 
         final_answer = "".join(chunks)
