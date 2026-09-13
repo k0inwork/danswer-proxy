@@ -518,6 +518,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         rate_limit_retries = 0
         max_rate_limit_retries = 5
         generic_error_retries = 0
+        conn_retries = 0
 
         try:
             while redispatch_count <= max_redispatches:
@@ -726,6 +727,36 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         logger.warning("Generic upstream error (retry %d/2). Waiting 5s before retrying.", generic_error_retries)
                         yield "\n\n> ⏳ Upstream error — waiting 5s…\n\n"
                         time.sleep(5)
+                        continue
+                    # Transient connection drops between the proxy and Onyx
+                    # (SSE cut mid-stream, chunked-encoding errors, resets).
+                    # Retry the same message when nothing was streamed; send a
+                    # continuation prompt when content was already flowing.
+                    transient_conn = any(
+                        s in exc_str.lower()
+                        for s in (
+                            "response ended prematurely",
+                            "connection broken",
+                            "connection reset",
+                            "incompleteread",
+                            "chunked encoding",
+                            "read timed out",
+                        )
+                    )
+                    if transient_conn and conn_retries < 3:
+                        conn_retries += 1
+                        if not streamed_anything:
+                            logger.warning("Stream connection dropped before output (retry %d/3). Waiting 3s and retrying.", conn_retries)
+                            yield f"\n\n> ⏳ Connection to the LLM backend dropped — retrying ({conn_retries}/3)…\n\n"
+                            time.sleep(3)
+                            continue
+                        logger.warning("Stream connection dropped mid-answer (retry %d/3). Waiting 3s, then continuing.", conn_retries)
+                        yield f"\n\n> ⏳ Connection dropped mid-answer — waiting 3s, continuing ({conn_retries}/3)…\n\n"
+                        time.sleep(3)
+                        current_message_to_send = (
+                            "You were interrupted by a connection drop. Continue exactly where you stopped, "
+                            "without repeating content already written."
+                        )
                         continue
                     raise inner_exc
 
