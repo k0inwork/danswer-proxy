@@ -172,12 +172,13 @@ class TestBlockingFileSyncAndRedispatch(unittest.TestCase):
             self.sync.descriptors[canonical] = ready_desc
             mock_blocking_sync.return_value = ready_desc
 
-            # Process query
+            # Process query (descriptor attachment is opt-in; enable for this test)
             messages = [{"role": "user", "content": "Please review the security of crypto.py"}]
-            chunks = list(orchestrator.process_query(
-                conversation_id="conv-redispatch-1",
-                messages=messages,
-            ))
+            with patch("orchestrator.core.config.ATTACH_DESCRIPTORS", True):
+                chunks = list(orchestrator.process_query(
+                    conversation_id="conv-redispatch-1",
+                    messages=messages,
+                ))
 
             # Verify blocking sync was called
             mock_blocking_sync.assert_called_once_with("src/security/crypto.py")

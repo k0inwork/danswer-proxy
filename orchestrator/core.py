@@ -20,6 +20,7 @@ from orchestrator.config import (
     logger,
     resolve_model_key,
 )
+from orchestrator import config
 from orchestrator.models import DescriptorStatus, Segment, UpstreamRateLimitError
 from orchestrator.session_store import ConversationStore
 from orchestrator.tool_parser import (
@@ -37,6 +38,8 @@ class Orchestrator:
         connection info rather than injected instructions."""
         sync = self.workspace_sync
         cwd = sync.root if (sync and hasattr(sync, "root")) else os.getcwd()
+        from orchestrator.config import PERSONAS
+        persona_list = ", ".join(f"{pid} ({name})" for pid, name in sorted(PERSONAS.items()))
         return (
             "\n\n[Workspace tool bridge]\n"
             "This chat is relayed by the user's local proxy, which is connected to their machine. "
@@ -45,7 +48,9 @@ class Orchestrator:
             "<local_tool><name>write_file</name>"
             "<arguments>{\"file_path\": \"sample.py\", \"content\": \"...\"}</arguments></local_tool>\n"
             f"Available operations: read_file(file_path), write_file(file_path, content), "
-            f"list_dir(path), grep_search(query, path). Workspace root: {cwd}"
+            f"list_dir(path), grep_search(query, path). Workspace root: {cwd}\n"
+            "Specialist delegation: ask_persona(persona_id, query) runs the query with a specialist "
+            f"assistant and returns its answer. Available personas: {persona_list}."
         )
 
     @staticmethod
@@ -462,7 +467,10 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         try:
             while redispatch_count <= max_redispatches:
                 # Only pull descriptors that have reached READY state via on_attach_complete callback
-                file_descriptors = self.workspace_sync.get_ready_descriptors() if self.workspace_sync else []
+                file_descriptors = (
+                    self.workspace_sync.get_ready_descriptors()
+                    if (self.workspace_sync and config.ATTACH_DESCRIPTORS) else []
+                )
 
                 try:
                     response = self.client.send_message(

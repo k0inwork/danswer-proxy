@@ -591,12 +591,13 @@ class DanswerClient:
             "deep_research": False,
             "stream": stream,
             "include_citations": False,
-            "llm_override": {
+        }
+        if model is not None:
+            payload["llm_override"] = {
                 "temperature": temperature,
                 "model_provider": MODELS[model][1],
                 "model_version": MODELS[model][2],
-            },
-        }
+            }
 
         if allowed_tool_ids is not None:
             payload["allowed_tool_ids"] = allowed_tool_ids

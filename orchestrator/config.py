@@ -54,6 +54,15 @@ WORKSPACE_EAGER_SYNC = (
 # model's local_tool calls are executed and the results are sent back to Onyx.
 MAX_REDISPATCHES = int(os.getenv("MAX_REDISPATCHES", "6"))
 
+# Attach READY file descriptors to every send-chat-message payload. Off by
+# default: sessions run under the default persona inside the workspace
+# project, so Onyx auto-injects the project's files as context natively and
+# per-message descriptors are redundant weight. Set ATTACH_DESCRIPTORS=1 to
+# restore explicit attachment (needed if sessions do not use a project).
+ATTACH_DESCRIPTORS = (
+    os.getenv("ATTACH_DESCRIPTORS", "0") == "1"
+)
+
 GENERAL_PERSONA_ID = 0
 # Onyx precedence rule (upstream resolve_context_user_files): a CUSTOM persona
 # injects its own system prompt (e.g. an "analyst" instruction that fights the

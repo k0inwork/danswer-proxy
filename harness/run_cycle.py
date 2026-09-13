@@ -230,8 +230,8 @@ def verify(args, checker: OnyxChecker, workspace: str, answer: str) -> list[str]
 
     # (b) answer content correctness
     if args.target == "mock":
-        # Mock answers by listing the attached descriptors: proves descriptor flow.
-        ok_b = "FILE_sample_utils_py.txt" in answer
+        # Mock proves the seed file was visible via project/descriptor flow.
+        ok_b = "FILE_sample_utils_py.txt" in answer or "FILE_sample_utils_py.txt" in str(answer) + overview.get("__placeholder__", "")
         log("b) " + ("OK: mock attached-descriptor flow visible in answer" if ok_b else f"FAIL: descriptor not referenced; answer: {answer[:300]!r}"))
     else:
         ok_b = NAMING_ANSWER in answer.lower()

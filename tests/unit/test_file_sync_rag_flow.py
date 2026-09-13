@@ -200,10 +200,11 @@ class TestFileUploadAndRAGFlow(unittest.TestCase):
         messages = [
             {"role": "user", "content": "What fields does the User model have?"}
         ]
-        chunks = list(orchestrator.process_query(
-            conversation_id="conv-1",
-            messages=messages,
-        ))
+        with patch("orchestrator.core.config.ATTACH_DESCRIPTORS", True):
+            chunks = list(orchestrator.process_query(
+                conversation_id="conv-1",
+                messages=messages,
+            ))
 
         # Check send_message was called with the uploaded file descriptor
         self.mock_client.send_message.assert_called_once()

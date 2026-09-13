@@ -342,6 +342,14 @@ def send_chat_message():
     import re as _re_tag
     user_actual_text = _re_tag.sub(r"<local_tool>.*?</local_tool>", "", user_actual_text, flags=_re_tag.S).strip()
 
+    # Project files are natively visible to sessions created with a project_id
+    # (default persona + project). Mirrors Onyx resolve_context_user_files.
+    session = STATE["chat_sessions"].get(session_id) or {}
+    project_id = session.get("project_id")
+    project_file_names = [
+        f.get("name", "") for f in STATE["project_files"].get(project_id, [])
+    ] if project_id else []
+
     # Determine response text based on attached file descriptors or tool call triggers
     requested_file_attached = False
     target_path = "src/auth.py"
@@ -366,13 +374,18 @@ def send_chat_message():
             if (clean_w.endswith(".py") or clean_w.endswith(".txt")) and not clean_w.startswith("["):
                 target_path = clean_w
                 break
-        if file_descriptors:
-            for fd in file_descriptors:
-                fname = fd.get("name", "")
-                target_token = target_path.replace("/", "_").replace(".", "_")
-                if target_token in fname or target_path in fname:
-                    requested_file_attached = True
-                    break
+        target_token = target_path.replace("/", "_").replace(".", "_")
+        for fd in file_descriptors:
+            fname = fd.get("name", "")
+            if target_token in fname or target_path in fname:
+                requested_file_attached = True
+                break
+        if not requested_file_attached:
+            # Also visible via native project-file injection
+            requested_file_attached = any(
+                target_token in pname or target_path in pname
+                for pname in project_file_names
+            )
 
     if has_read_trigger and requested_file_attached:
         attached_info = []
@@ -380,10 +393,13 @@ def send_chat_message():
             fid = fd.get("id") or fd.get("file_id")
             fname = fd.get("name") or fid
             attached_info.append(f"{fname} ({fid})")
+        listed = [a.split(" (")[0] for a in attached_info]
+        attached_info.extend(n for n in project_file_names if n not in listed)
         files_str = ", ".join(attached_info)
         response_text = f"Mock Onyx answer to: {user_actual_text} [Attached files: {files_str}]"
     elif tool_results_returned:
-        response_text = f"Mock Onyx answer to: {user_actual_text} [tool executed successfully]"
+        visible_files = ", ".join(project_file_names) or "none"
+        response_text = f"Mock Onyx answer to: {user_actual_text} [tool executed successfully] [Project files: {visible_files}]"
     elif has_write_trigger:
         write_path = write_match.group(1).strip() if write_match else "updated_file.txt"
         response_text = (
@@ -392,12 +408,13 @@ def send_chat_message():
         )
     elif has_read_trigger and not requested_file_attached:
         response_text = f'<local_tool><name>read_file</name><arguments>{{"file_path": "{target_path}"}}</arguments></local_tool>'
-    elif file_descriptors:
+    elif file_descriptors or project_file_names:
         attached_info = []
         for fd in file_descriptors:
             fid = fd.get("id") or fd.get("file_id")
             fname = fd.get("name") or fid
             attached_info.append(f"{fname} ({fid})")
+        attached_info.extend(n for n in project_file_names if n not in [a.split(" (")[0] for a in attached_info])
         files_str = ", ".join(attached_info)
         response_text = f"Mock Onyx answer to: {user_actual_text} [Attached files: {files_str}]"
     else:

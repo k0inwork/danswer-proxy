@@ -309,12 +309,71 @@ class WorkspaceProjectSync:
         )
         return self.upload_and_attach_blocking(file_path=target_path, content=content)
 
+    def _execute_persona_tool(self, args: Dict[str, Any]) -> str:
+        """Run a query in a temporary Onyx session with a specialist persona.
+
+        Arguments: {"persona_id": int} (or {"persona_name": "..."}), "query": str.
+        Creates the session, sends the query non-streaming, deletes the session,
+        and returns the specialist's answer as the tool result."""
+        from orchestrator.config import PERSONAS, logger as cfg_logger
+
+        persona_id: Optional[int] = None
+        raw_pid = args.get("persona_id")
+        if raw_pid is not None and str(raw_pid).isdigit():
+            persona_id = int(raw_pid)
+        persona_name = (args.get("persona_name") or args.get("name") or "").lower().strip()
+        if persona_id is None and persona_name:
+            for pid, pname in PERSONAS.items():
+                if pname.lower() == persona_name or persona_name in pname.lower():
+                    persona_id = pid
+                    break
+        if persona_id is None:
+            available = ", ".join(f"{pid}={name}" for pid, name in sorted(PERSONAS.items()))
+            return f"Error: no persona specified. Available personas: {available}"
+
+        query = args.get("query") or args.get("message") or args.get("question") or ""
+        if not query:
+            return "Error: 'query' argument is required for ask_persona."
+
+        try:
+            session_id = self.client.create_chat_session(
+                persona_id=persona_id,
+                project_id=self.project_id,
+                kind=f"persona-tool-{persona_id}",
+            )
+            try:
+                # A custom persona suppresses Onyx's automatic project-file
+                # injection, so the specialist gets the synced workspace
+                # files as explicit descriptors instead.
+                response = self.client.send_message(
+                    session_id=session_id,
+                    message=query,
+                    stream=False,
+                    file_descriptors=self.get_ready_descriptors(),
+                    model=None,
+                )
+                answer = self.client.extract_complete_answer(response)
+            finally:
+                try:
+                    self.client.delete_chat_session(session_id, kind="persona-tool")
+                except Exception:
+                    pass
+            return f"[Persona {persona_id} ({PERSONAS.get(persona_id, '?')}) answered]:\n{answer}"
+        except Exception as exc:
+            logger.warning("ask_persona tool failed for persona_id=%s: %s", persona_id, exc)
+            return f"Error executing persona tool: {exc}"
+
     def execute_local_non_read_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
         """
         Executes a local tool against the workspace disk (e.g. list_dir, grep_search, find_files, write_file).
         """
         t_name = (tool_name or "").lower().strip()
         res_output = ""
+
+        # 0. Persona delegation: run the query in a temporary Onyx session
+        # with the requested specialist persona and return its answer.
+        if t_name in {"ask_persona", "persona", "analyst"}:
+            return self._execute_persona_tool(args)
 
         # 1. Directory listing (list_dir, ls, dir)
         if t_name in {"list_dir", "ls", "dir"}:
