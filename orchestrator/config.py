@@ -63,6 +63,14 @@ ATTACH_DESCRIPTORS = (
     os.getenv("ATTACH_DESCRIPTORS", "0") == "1"
 )
 
+# Persistent index mapping client chat-history prefixes to Onyx sessions, so
+# ID-less clients (they resend the full transcript each request) keep one
+# Onyx session per conversation and its accumulated history is reused.
+SESSION_HISTORY_CACHE_FILE = os.getenv(
+    "SESSION_HISTORY_CACHE_FILE",
+    "session_history_cache.json",
+)
+
 GENERAL_PERSONA_ID = 0
 # Onyx precedence rule (upstream resolve_context_user_files): a CUSTOM persona
 # injects its own system prompt (e.g. an "analyst" instruction that fights the

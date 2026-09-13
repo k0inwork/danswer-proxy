@@ -17,7 +17,7 @@ from orchestrator.models import Descriptor, DescriptorStatus
 class WorkspaceProjectSync:
     IGNORE_DIRS = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.cache', 'dist', 'build', '.idea', '.vscode', 'log', 'logs'}
     IGNORE_EXTS = ('.pyc', '.pyo', '.pyd', '.so', '.dll', '.dylib', '.tar', '.gz', '.zip', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf', '.log', '.tmp')
-    IGNORE_FILES = {'persona_matrix_cache.json', 'workspace_sync_cache.json'}
+    IGNORE_FILES = {'persona_matrix_cache.json', 'workspace_sync_cache.json', 'session_history_cache.json'}
 
     def __init__(self, workspace_root: str, client: Any):
         self.root = os.path.abspath(workspace_root)

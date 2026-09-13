@@ -28,6 +28,8 @@ from orchestrator.config import (
     resolve_model_key,
 )
 from orchestrator.core import Orchestrator
+from orchestrator.config import SESSION_HISTORY_CACHE_FILE
+from orchestrator.session_store import HistorySessionIndex
 from orchestrator.matrix_manager import MatrixManager
 from orchestrator.models import session_registry, UpstreamRateLimitError
 from orchestrator.tool_parser import (
@@ -41,6 +43,7 @@ app = Flask(__name__)
 
 client: Optional[DanswerClient] = None
 orchestrator: Optional[Orchestrator] = None
+history_index: Optional["HistorySessionIndex"] = None
 
 
 def make_completion_chunk(
@@ -86,11 +89,15 @@ def chat_completions():
     if provided_conversation_id:
         conversation_id = provided_conversation_id
     else:
-        # Stateless mode: clients that do not manage conversations (they
-        # resend full history each request) get a fresh Onyx session per
-        # request. This prevents one poisoned/bloated shared Onyx session
-        # from leaking stale failures into every later turn.
-        conversation_id = f"req-{uuid4().hex[:12]}"
+        # ID-less clients resend the full transcript each request: match the
+        # user-message digest sequence against known conversations so the
+        # Onyx session (with all its accumulated history) is reused instead
+        # of starting a fresh session per request.
+        global history_index
+        if history_index is None:
+            history_index = HistorySessionIndex(SESSION_HISTORY_CACHE_FILE)
+        digests = history_index.digest_user_messages(messages)
+        conversation_id = history_index.match(digests) or history_index.register(digests)
 
     req_model = data.get("model")
     if req_model and isinstance(req_model, str):
@@ -539,7 +546,7 @@ def init_orchestrator(
     danswer_token: Optional[str] = DANSWER_API_TOKEN,
     workspace_root: Optional[str] = None,
 ) -> Tuple[DanswerClient, Orchestrator]:
-    global client, orchestrator
+    global client, orchestrator, history_index
 
     if not danswer_token:
         print("DANSWER_API_TOKEN environment variable is required", file=sys.stderr)
@@ -548,6 +555,12 @@ def init_orchestrator(
     import os
     root_path = workspace_root or os.getcwd()
     init_run_logger(workspace_root=root_path)
+
+    history_index = HistorySessionIndex(
+        os.getenv("SESSION_HISTORY_CACHE_FILE", SESSION_HISTORY_CACHE_FILE)
+        if os.path.isabs(os.getenv("SESSION_HISTORY_CACHE_FILE", SESSION_HISTORY_CACHE_FILE))
+        else os.path.join(root_path, os.getenv("SESSION_HISTORY_CACHE_FILE", SESSION_HISTORY_CACHE_FILE))
+    )
 
     logger.info("Connecting to Onyx URL: %s", danswer_url)
     client = DanswerClient(danswer_url=danswer_url, api_token=danswer_token)

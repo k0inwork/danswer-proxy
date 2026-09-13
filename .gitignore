@@ -20,3 +20,4 @@ persona_matrix_cache.json
 harness/.cycle_workspace/
 harness/.cycle_proxy.log
 danswer_proxy.egg-info/
+session_history_cache.json
