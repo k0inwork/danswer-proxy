@@ -399,7 +399,10 @@ def send_chat_message():
         response_text = f"Mock Onyx answer to: {user_actual_text} [Attached files: {files_str}]"
     elif tool_results_returned:
         visible_files = ", ".join(project_file_names) or "none"
-        response_text = f"Mock Onyx answer to: {user_actual_text} [tool executed successfully] [Project files: {visible_files}]"
+        response_text = (
+            f"Mock Onyx answer to: {user_actual_text} [tool executed successfully] "
+            f"[Attached files: {visible_files}]"
+        )
     elif has_write_trigger:
         write_path = write_match.group(1).strip() if write_match else "updated_file.txt"
         response_text = (

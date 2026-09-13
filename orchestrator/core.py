@@ -578,7 +578,16 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                         prompt_sections.append("\n".join(attached_headers))
                                     if tool_result_entries:
                                         prompt_sections.append("[LOCAL TOOL EXECUTION RESULTS]:\n" + "\n\n".join(tool_result_entries))
-                                    prompt_sections.append(f"[ORIGINAL REQUEST]:\n{message_for_persona}")
+                                    # NOTE: do NOT re-embed message_for_persona
+                                    # here. The Onyx session history already
+                                    # contains the original request from the
+                                    # first round; re-sending it multiplies
+                                    # uncached input tokens by the number of
+                                    # tool rounds (the main cause of upstream
+                                    # rate-limit hits on long sessions).
+                                    prompt_sections.append(
+                                        "[Continue handling the original request from the earlier message in this conversation.]"
+                                    )
 
                                     current_message_to_send = "\n\n".join(prompt_sections)
                                     redispatch_count += 1
