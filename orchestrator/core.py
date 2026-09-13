@@ -761,23 +761,26 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                     raise inner_exc
 
         except UpstreamRateLimitError:
-            # The client will retry with its own backoff; our stateless session
-            # mode gives that retry a fresh Onyx session. Delete this one so it
-            # does not linger until the next startup sweep.
-            try:
-                self.client.delete_chat_session(active.session_id, kind="rate_limited_cleanup")
-            except Exception:
-                pass
-            self.sessions.discard_active(conversation_id, reason="rate_limited")
+            # Stateless (req-*) sessions hold a single request — nothing to
+            # preserve, delete so the client's retry starts clean. Persistent
+            # conversations (client-provided conversation ID) keep their
+            # Onyx session: it stores the whole chat history, and the store
+            # segment stays ACTIVE so the next turn continues it.
+            if conversation_id.startswith("req-"):
+                try:
+                    self.client.delete_chat_session(active.session_id, kind="rate_limited_cleanup")
+                except Exception:
+                    pass
+                self.sessions.discard_active(conversation_id, reason="rate_limited")
             raise
         except Exception as exc:
             logger.error("Streaming message invocation failed: %s", exc)
-            # Same: drop the exhausted session so client-side retries start clean.
-            try:
-                self.client.delete_chat_session(active.session_id, kind="failed_cleanup")
-            except Exception:
-                pass
-            self.sessions.discard_active(conversation_id, reason="failed")
+            if conversation_id.startswith("req-"):
+                try:
+                    self.client.delete_chat_session(active.session_id, kind="failed_cleanup")
+                except Exception:
+                    pass
+                self.sessions.discard_active(conversation_id, reason="failed")
             raise RuntimeError(f"Onyx invocation error: {exc}") from exc
 
         final_answer = "".join(chunks)
