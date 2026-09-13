@@ -151,40 +151,50 @@ class ProxyHandle:
         raise RuntimeError("mock Onyx server did not start")
 
 
-def chat_completion(port: int, prompt: str, conversation_id: str, timeout: float = 300.0) -> str:
-    deadline = time.time() + timeout
-    while True:
-        r = requests.post(
-            f"http://127.0.0.1:{port}/v1/chat/completions",
-            json={
-                "model": "claude-sonnet-4.6",
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            },
-            headers={"X-Conversation-ID": conversation_id},
-            timeout=timeout,
-        )
-        if r.status_code == 429:
-            wait = float(r.headers.get("Retry-After", "5"))
-            log(f"429 rate limited; retrying in {wait}s ...")
-            if time.time() + wait > deadline:
-                raise RuntimeError("rate limit retry window exceeded")
-            time.sleep(wait)
-            continue
-        r.raise_for_status()
-        data = r.json()
-        msg = data["choices"][0]["message"]
-        return msg.get("content") or ""
+class TranscriptClient:
+    """ID-less client: resends the full transcript each request (like
+    openclaude) so the proxy's history-matched session reuse is exercised."""
+
+    def __init__(self, port: int):
+        self.port = port
+        self.messages: list[dict] = []
+
+    def send(self, prompt: str, timeout: float = 300.0) -> str:
+        self.messages.append({"role": "user", "content": prompt})
+        deadline = time.time() + timeout
+        while True:
+            r = requests.post(
+                f"http://127.0.0.1:{self.port}/v1/chat/completions",
+                json={"model": "claude-sonnet-4.6", "messages": self.messages, "stream": False},
+                timeout=timeout,
+            )
+            if r.status_code == 429:
+                wait = float(r.headers.get("Retry-After", "5"))
+                log(f"429 rate limited; retrying in {wait}s ...")
+                if time.time() + wait > deadline:
+                    raise RuntimeError("rate limit retry window exceeded")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            answer = data["choices"][0]["message"].get("content") or ""
+            self.messages.append({"role": "assistant", "content": answer})
+            return answer
 
 
-def run_openclaude(workspace: str, port: int, prompt: str, model: str) -> str:
+def run_openclaude(workspace: str, port: int, prompt: str, model: str, continue_session: bool = False) -> str:
     env = dict(os.environ)
     env.update({
         "OPENAI_API_BASE": f"http://127.0.0.1:{port}/v1",
+        "OPENAI_BASE_URL": f"http://127.0.0.1:{port}/v1",
         "OPENAI_API_KEY": "harness-dummy",
         "ANTHROPIC_API_KEY": "",
     })
-    cmd = ["openclaude", "-p", prompt, "--model", model]
+    cmd = ["openclaude", "-p", prompt, "--model", model, "--debug-file", os.path.join(workspace, "..", "openclaude-debug.log")]
+    if continue_session:
+        # Continue the most recent conversation in this directory: the CLI
+        # resends its own transcript, exactly like real multi-turn usage.
+        cmd.insert(1, "-c")
     log(f"Running: {' '.join(cmd)}")
     res = subprocess.run(
         cmd, cwd=workspace, env=env, capture_output=True, text=True, timeout=900
@@ -309,8 +319,12 @@ def main() -> int:
 
     checker = OnyxChecker(danswer_url, token)
     workspace = make_workspace()
-    proxy = ProxyHandle(workspace, args.port, danswer_url, token)
-    conversation_id = f"harness-cycle-{int(time.time())}"
+    # openclaude routes to its saved local provider profile (default
+    # http://127.0.0.1:8080/v1, model "any") and ignores env overrides, so
+    # run the proxy on 8080 for exact real-client behavior.
+    port = 8080 if args.client == "openclaude" and args.port == 8199 else args.port
+    proxy = ProxyHandle(workspace, port, danswer_url, token)
+    client = TranscriptClient(port)
 
     edit_prompt = EDIT_PROMPT
     if args.target == "mock":
@@ -323,18 +337,28 @@ def main() -> int:
             proxy.start_mock_onyx(args.mock_port)
         proxy.start()
 
-        def run_client(prompt: str) -> str:
+        def run_client(prompt: str, continue_session: bool = False) -> str:
             if args.client == "openclaude":
-                return run_openclaude(workspace, args.port, prompt, args.model)
-            return chat_completion(args.port, prompt, conversation_id)
+                return run_openclaude(workspace, port, prompt, args.model, continue_session=continue_session)
+            return client.send(prompt)
 
         log(f"Turn 1: reading question via client={args.client} target={args.target} ...")
         answer = run_client(QUESTION_PROMPT)
         log(f"Client answer (first 400 chars): {answer[:400]!r}")
 
         log("Turn 2: file edit request ...")
-        edit_answer = run_client(edit_prompt)
+        edit_answer = run_client(edit_prompt, continue_session=True)
         log(f"Edit answer (first 200 chars): {edit_answer[:200]!r}")
+
+        # History-matched session reuse: turn 2 resends turn 1's transcript,
+        # so the proxy must have reused the Onyx session instead of making a
+        # new one. Only meaningful for the built-in HTTP client.
+        if args.client == "http":
+            proxy_log = open(proxy.log_path, encoding="utf-8").read()
+            if "History match: reusing conversation" in proxy_log:
+                log("e) OK: history-matched session reuse active (turn 2 reused the session)")
+            else:
+                failures.append("e) history-matched session reuse did not trigger on turn 2")
 
         failures = verify(args, checker, workspace, answer)
     except Exception as exc:

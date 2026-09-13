@@ -2,6 +2,7 @@
 Unit tests for ConversationStore and segment management.
 """
 
+import unittest
 from unittest.mock import MagicMock
 import pytest
 from orchestrator.session_store import ConversationStore
@@ -59,3 +60,54 @@ def test_detector_session_lifecycle():
     # Reset
     store.reset_detector_session("conv-100")
     mock_client.delete_chat_session.assert_called_with("detector_sess_1", kind="detector_reset")
+
+
+class TestHistorySessionIndex(unittest.TestCase):
+    def setUp(self):
+        import os, tempfile
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.remove(path)
+        self.path = path
+        from orchestrator.session_store import HistorySessionIndex
+        self.cls = HistorySessionIndex
+
+    def tearDown(self):
+        import os
+        if os.path.exists(self.path):
+            os.remove(self.path)
+
+    def _digests(self, *texts):
+        import hashlib
+        return [hashlib.sha256(t.encode()).hexdigest() for t in texts]
+
+    def test_register_and_prefix_match(self):
+        idx = self.cls(self.path)
+        dd = self._digests("hello", "continue")
+        conv = idx.register(dd[:1])
+        # transcript grew by one message -> prefix match, same conversation
+        self.assertEqual(idx.match(dd), conv)
+
+    def test_exact_retry_matches(self):
+        idx = self.cls(self.path)
+        d1 = self._digests("hello")
+        conv = idx.register(d1)
+        self.assertEqual(idx.match(d1), conv)
+
+    def test_no_match_for_different_history(self):
+        idx = self.cls(self.path)
+        idx.register(self._digests("hello"))
+        self.assertIsNone(idx.match(self._digests("different question")))
+
+    def test_no_match_when_incoming_is_shorter(self):
+        idx = self.cls(self.path)
+        d1, d2 = self._digests("a", "b")
+        idx.register([d1, d2])
+        self.assertIsNone(idx.match([d1]))
+
+    def test_persistence_across_instances(self):
+        d1 = self._digests("persist me")
+        idx = self.cls(self.path)
+        conv = idx.register(d1)
+        idx2 = self.cls(self.path)
+        self.assertEqual(idx2.match(d1), conv)
