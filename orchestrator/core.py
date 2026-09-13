@@ -350,6 +350,61 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
             project_id=project_id,
         )
 
+    @staticmethod
+    def _classify_tools(all_tools: List[dict]) -> Tuple[bool, set]:
+        write_tools = {"write_file", "write", "create_file", "edit_file", "modify_file", "save_file", "replace_in_file"}
+        non_read_tools = {"list_dir", "ls", "dir", "grep_search", "grep", "search_code"} | write_tools
+        has_read_tool = False
+        for t in all_tools:
+            t_name = (t.get("name") or "").lower().strip()
+            t_args = t.get("arguments") or {}
+            t_fp = t_args.get("file_path") or t_args.get("path")
+            if t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools):
+                has_read_tool = True
+                break
+        return has_read_tool, non_read_tools
+
+    def _run_tool_batch(self, all_tools: List[dict], non_read_tools: set) -> Tuple[List[str], List[str]]:
+        """Execute an intercepted tool batch server-side. Returns
+        (attached_headers, tool_result_entries) for the redispatch message."""
+        attached_headers: List[str] = []
+        tool_result_entries: List[str] = []
+
+        for t in all_tools:
+            t_name = (t.get("name") or "").lower().strip()
+            t_args = t.get("arguments") or {}
+            t_fp = t_args.get("file_path") or t_args.get("path")
+            is_read = t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools)
+
+            if is_read and t_fp:
+                logger.info("[AUTO-GROUNDING SYNC] Blocking sync for file: '%s'", t_fp)
+                desc = self.workspace_sync.upload_and_attach_blocking(t_fp)
+                canonical = desc.canonical_name if (desc and desc.canonical_name) else self.workspace_sync.canonical_name(t_fp, is_dir=False)
+                if desc and desc.status == DescriptorStatus.READY:
+                    attached_headers.append(f"FILE {t_fp} was attached as {canonical}")
+                    tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Attached and indexed in project context as {canonical}.")
+                    get_run_logger().log_tool_call(
+                        tool_name=t_name,
+                        arguments=t_args,
+                        result_summary=f"Intercepted for blocking workspace sync: {canonical}",
+                        intercepted=True,
+                    )
+                else:
+                    tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Failed to sync file to project.")
+                    get_run_logger().log_tool_call(
+                        tool_name=t_name,
+                        arguments=t_args,
+                        result_summary=f"Failed blocking sync for file: {t_fp}",
+                        intercepted=True,
+                    )
+            else:
+                # Execute local non-read tool against workspace disk
+                res_output = self.workspace_sync.execute_local_non_read_tool(t.get("name", ""), t_args)
+                logger.info("[AUTO-GROUNDING LOCAL TOOL] Executed non-read tool '%s': %s", t.get("name"), res_output[:120])
+                tool_result_entries.append(f"- Tool '{t.get('name')}' output:\n{res_output}")
+
+        return attached_headers, tool_result_entries
+
     def process_query(
         self,
         conversation_id: str,
@@ -497,87 +552,50 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         if "<local_tool>" in buffered_output and "</local_tool>" in buffered_output and self.workspace_sync and redispatch_count < max_redispatches:
                             all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
                             if all_tools:
-                                # Detect if any read/grounding tool is present in the invocation batch
-                                write_tools = {"write_file", "write", "create_file", "edit_file", "modify_file", "save_file", "replace_in_file"}
-                                non_read_tools = {"list_dir", "ls", "dir", "grep_search", "grep", "search_code"} | write_tools
-                                has_read_tool = False
-                                for t in all_tools:
-                                    t_name = (t.get("name") or "").lower().strip()
-                                    t_args = t.get("arguments") or {}
-                                    t_fp = t_args.get("file_path") or t_args.get("path")
-                                    if t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools):
-                                        has_read_tool = True
-                                        break
+                                has_read_tool, non_read_tools = self._classify_tools(all_tools)
 
-                                # Intercept ANY local_tool batch: read/grounding tools
-                                # get a blocking workspace sync, non-read tools
-                                # (write_file etc.) are executed against the
-                                # workspace disk so the watcher syncs them to Onyx.
-                                if True:
-                                    intercepted_batch = True
+                                intercepted_batch = True
 
-                                    # A) Stream the model's preamble (text
-                                    # before the first tool tag) to the client
-                                    # right away instead of swallowing it with
-                                    # the intercept — keeps the client's stream
-                                    # alive and shows intent.
-                                    first_raw = next((t.get("raw") for t in all_tools if t.get("raw")), None)
-                                    if first_raw and not streamed_anything:
-                                        preamble = buffered_output.split(first_raw, 1)[0].strip()
-                                        if preamble:
-                                            logger.info("[AUTO-GROUNDING INTERCEPT] Streaming preamble (%d chars) before tool execution.", len(preamble))
-                                            yield preamble
+                                # A) Stream the model's preamble (text
+                                # before the first tool tag) to the client
+                                # right away instead of swallowing it with
+                                # the intercept — keeps the client's stream
+                                # alive and shows intent.
+                                first_raw = next((t.get("raw") for t in all_tools if t.get("raw")), None)
+                                if first_raw and not streamed_anything:
+                                    preamble = buffered_output.split(first_raw, 1)[0].strip()
+                                    if preamble:
+                                        logger.info("[AUTO-GROUNDING INTERCEPT] Streaming preamble (%d chars) before tool execution.", len(preamble))
+                                        yield preamble
 
-                                    logger.info("[AUTO-GROUNDING INTERCEPT] Intercepted batch of %d tool call(s) containing read/grounding tool.", len(all_tools))
-                                    get_run_logger().log_tool_call(
-                                        tool_name="[AUTO_GROUNDING_BATCH]",
-                                        arguments={"tool_count": len(all_tools)},
-                                        result_summary="Intercepted read tools for blocking workspace sync",
-                                        intercepted=True,
-                                    )
+                                logger.info("[AUTO-GROUNDING INTERCEPT] Intercepted batch of %d tool call(s).", len(all_tools))
+                                get_run_logger().log_tool_call(
+                                    tool_name="[AUTO_GROUNDING_BATCH]",
+                                    arguments={"tool_count": len(all_tools)},
+                                    result_summary="Intercepted tool batch for workspace sync/execution",
+                                    intercepted=True,
+                                )
 
-                                    attached_headers: List[str] = []
-                                    tool_result_entries: List[str] = []
+                                attached_headers, tool_result_entries = self._run_tool_batch(all_tools, non_read_tools)
 
-                                    for t in all_tools:
-                                        t_name = (t.get("name") or "").lower().strip()
-                                        t_args = t.get("arguments") or {}
-                                        t_fp = t_args.get("file_path") or t_args.get("path")
-                                        is_read = t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools)
+                                # If another tag was started behind the batch but
+                                # not completed before the intercept, the model's
+                                # intent would be lost — tell it to re-emit.
+                                last_raw = [t.get("raw") for t in all_tools if t.get("raw")]
+                                if last_raw:
+                                    trailing = buffered_output.rsplit(last_raw[-1], 1)[-1]
+                                    if "<local_tool>" in trailing:
+                                        tool_result_entries.append(
+                                            "- Note: your previous message contained an additional tool call "
+                                            "that was cut off. Re-emit it completely if it is still needed."
+                                        )
 
-                                        if is_read and t_fp:
-                                            logger.info("[AUTO-GROUNDING SYNC] Blocking sync for file: '%s'", t_fp)
-                                            desc = self.workspace_sync.upload_and_attach_blocking(t_fp)
-                                            canonical = desc.canonical_name if (desc and desc.canonical_name) else self.workspace_sync.canonical_name(t_fp, is_dir=False)
-                                            if desc and desc.status == DescriptorStatus.READY:
-                                                attached_headers.append(f"FILE {t_fp} was attached as {canonical}")
-                                                tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Attached and indexed in project context as {canonical}.")
-                                                get_run_logger().log_tool_call(
-                                                    tool_name=t_name,
-                                                    arguments=t_args,
-                                                    result_summary=f"Intercepted for blocking workspace sync: {canonical}",
-                                                    intercepted=True,
-                                                )
-                                            else:
-                                                tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Failed to sync file to project.")
-                                                get_run_logger().log_tool_call(
-                                                    tool_name=t_name,
-                                                    arguments=t_args,
-                                                    result_summary=f"Failed blocking sync for file: {t_fp}",
-                                                    intercepted=True,
-                                                )
-                                        else:
-                                            # Execute local non-read tool against workspace disk
-                                            res_output = self.workspace_sync.execute_local_non_read_tool(t.get("name", ""), t_args)
-                                            logger.info("[AUTO-GROUNDING LOCAL TOOL] Executed non-read tool '%s': %s", t.get("name"), res_output[:120])
-                                            tool_result_entries.append(f"- Tool '{t.get('name')}' output:\n{res_output}")
-
-                                    # Construct prompt with file attachments, real tool results, and original query
-                                    prompt_sections = []
-                                    if attached_headers:
-                                        prompt_sections.append("\n".join(attached_headers))
-                                    if tool_result_entries:
-                                        prompt_sections.append("[LOCAL TOOL EXECUTION RESULTS]:\n" + "\n\n".join(tool_result_entries))
+                                # Construct prompt with file attachments, real tool results, and original query
+                                prompt_sections = []
+                                if attached_headers:
+                                    prompt_sections.append("\n".join(attached_headers))
+                                if tool_result_entries:
+                                    prompt_sections.append("[LOCAL TOOL EXECUTION RESULTS]:\n" + "\n\n".join(tool_result_entries))
                                     # NOTE: do NOT re-embed message_for_persona
                                     # here. The Onyx session history already
                                     # contains the original request from the
@@ -609,6 +627,38 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                             yield c
                         turn_chunks = []
                         streamed_anything = True
+
+                    # End-of-round safety net: a tag that completes exactly at
+                    # stream end must still be intercepted before the output is
+                    # treated as final (otherwise write_file leaks to the client
+                    # unexecuted).
+                    if (
+                        not intercepted_batch and self.workspace_sync
+                        and "<local_tool>" in buffered_output and "</local_tool>" in buffered_output
+                        and redispatch_count < max_redispatches
+                    ):
+                        all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
+                        if all_tools:
+                            logger.warning("[AUTO-GROUNDING INTERCEPT] Tag completed at stream end (missed by per-chunk check); intercepting now.")
+                            has_read_tool, non_read_tools = self._classify_tools(all_tools)
+                            intercepted_batch = True
+                            attached_headers, tool_result_entries = self._run_tool_batch(all_tools, non_read_tools)
+                            prompt_sections = []
+                            if attached_headers:
+                                prompt_sections.append("\n".join(attached_headers))
+                            if tool_result_entries:
+                                prompt_sections.append("[LOCAL TOOL EXECUTION RESULTS]:\n" + "\n\n".join(tool_result_entries))
+                            prompt_sections.append(
+                                "[Continue handling the original request from the earlier message in this conversation.]"
+                            )
+                            current_message_to_send = "\n\n".join(prompt_sections)
+                            redispatch_count += 1
+                            continue
+                        else:
+                            logger.warning(
+                                "[AUTO-GROUNDING INTERCEPT] Completed tag present but no tools extracted; buffered tail: %r",
+                                buffered_output[-300:],
+                            )
 
                     if not intercepted_batch:
                         if not streamed_anything:
