@@ -368,6 +368,35 @@ def send_chat_message():
     # final answer instead of re-triggering tool calls (avoids loops).
     tool_results_returned = "[LOCAL TOOL EXECUTION RESULTS]" in message
 
+    # Client-native tool trigger: emit a tool call for a tool the proxy does
+    # NOT execute server-side (e.g. openclaude's Agent sub-agent), forcing the
+    # proxy to pass it through to the client.
+    client_tool_match = _re.search(r"\[TRIGGER_TOOL_CLIENT:([A-Za-z_]+)\]", message)
+    if client_tool_match is not None and not tool_results_returned:
+        client_tool_name = client_tool_match.group(1)
+        response_text = (
+            "<local_tool><name>" + client_tool_name + "</name>"
+            "<arguments>" + '{"prompt": "Read the file sample_utils.py from the workspace and '
+            'report which variable naming convention is used in it."}' + "</arguments></local_tool>"
+        )
+        if session_id and session_id in STATE["chat_sessions"]:
+            STATE["chat_sessions"][session_id]["history"].append({
+                "role": "assistant",
+                "content": response_text,
+            })
+        if stream:
+            def generate_client_tool_sse():
+                payload = json.dumps({"answer_piece": response_text})
+                yield f"data: {payload}\n\n"
+                yield "data: [DONE]\n\n"
+            return Response(generate_client_tool_sse(), mimetype="text/event-stream",
+                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return jsonify({
+            "chat_session_id": session_id,
+            "answer": response_text,
+            "answer_citationless": response_text,
+        }), 200
+
     if has_read_trigger:
         for word in user_actual_text.split():
             clean_w = word.strip(" '\"\t\n,")

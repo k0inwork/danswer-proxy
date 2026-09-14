@@ -114,9 +114,18 @@ class ProxyHandle:
             try:
                 r = requests.get(f"{base}/health", timeout=2)
                 if r.status_code == 200:
-                    log(f"Proxy up on {base} (pid {self.proc.pid})")
-                    return
-            except Exception:
+                    # Guard against a squatter service on the port: only OUR
+                    # proxy reports this shape. Otherwise openclaude would
+                    # silently talk to the wrong backend.
+                    body = r.json()
+                    if "orchestrator_initialized" in body and "danswer_url" in body:
+                        log(f"Proxy up on {base} (pid {self.proc.pid})")
+                        return
+                    raise RuntimeError(
+                        f"port {self.port} is occupied by another service (health: {str(body)[:200]!r}); "
+                        "free it and rerun"
+                    )
+            except requests.RequestException:
                 pass
             time.sleep(1)
         raise RuntimeError("proxy did not become healthy in time")
@@ -182,6 +191,44 @@ class TranscriptClient:
             return answer
 
 
+def setup_openclaude_profile(port: int) -> Optional[str]:
+    """Point openclaude at the harness proxy by temporarily activating a
+    dedicated provider profile. Returns the previously active profile id so
+    restore_openclaude_profile() can put it back. (The saved profile overrides
+    OPENAI_BASE_URL env vars, so editing the config is the only reliable way.)"""
+    path = os.path.expanduser("~/.openclaude.json")
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    previous_active = cfg.get("activeProviderProfileId")
+    profiles = [p for p in cfg.get("providerProfiles", []) if p.get("name") != "harness"]
+    profiles.append({
+        "id": "provider_harness_cycle",
+        "name": "harness",
+        "provider": "ollama",  # openai-compatible passthrough
+        "baseUrl": f"http://127.0.0.1:{port}/v1",
+        "model": "any",
+    })
+    cfg["providerProfiles"] = profiles
+    cfg["activeProviderProfileId"] = "provider_harness_cycle"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    return previous_active
+
+
+def restore_openclaude_profile(previous_active: Optional[str]) -> None:
+    if previous_active is None:
+        return
+    path = os.path.expanduser("~/.openclaude.json")
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg["activeProviderProfileId"] = previous_active
+    cfg["providerProfiles"] = [
+        p for p in cfg.get("providerProfiles", []) if p.get("id") != "provider_harness_cycle"
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+
 def run_openclaude(workspace: str, port: int, prompt: str, model: str, continue_session: bool = False) -> str:
     env = dict(os.environ)
     env.update({
@@ -190,7 +237,8 @@ def run_openclaude(workspace: str, port: int, prompt: str, model: str, continue_
         "OPENAI_API_KEY": "harness-dummy",
         "ANTHROPIC_API_KEY": "",
     })
-    cmd = ["openclaude", "-p", prompt, "--model", model, "--debug-file", os.path.join(workspace, "..", "openclaude-debug.log")]
+    cmd = ["openclaude", "-p", prompt, "--model", model, "--permission-mode", "bypassPermissions",
+           "--debug-file", os.path.join(workspace, "..", "openclaude-debug.log")]
     if continue_session:
         # Continue the most recent conversation in this directory: the CLI
         # resends its own transcript, exactly like real multi-turn usage.
@@ -215,6 +263,14 @@ EDIT_PROMPT = (
     "Please update my workspace file sample_utils.py: use your local write_file tool "
     "to add a short one-line docstring to the function get_display_name. Keep the rest "
     "of the file unchanged."
+)
+
+# Exercised only with the openclaude client: asks the client to use one of its
+# OWN native tools (the Agent sub-agent). The proxy must pass those tools
+# through untouched instead of stub-executing them.
+SUBAGENT_PROMPT = (
+    "Report the variable naming convention used in sample_utils.py by delegating "
+    "the file read to a sub-agent. [TRIGGER_TOOL_CLIENT:Agent]"
 )
 
 
@@ -319,10 +375,9 @@ def main() -> int:
 
     checker = OnyxChecker(danswer_url, token)
     workspace = make_workspace()
-    # openclaude routes to its saved local provider profile (default
-    # http://127.0.0.1:8080/v1, model "any") and ignores env overrides, so
-    # run the proxy on 8080 for exact real-client behavior.
-    port = 8080 if args.client == "openclaude" and args.port == 8199 else args.port
+    # openclaude routes via its (temporarily swapped) provider profile to
+    # 127.0.0.1:<port>/v1, so any --port works.
+    port = args.port
     proxy = ProxyHandle(workspace, port, danswer_url, token)
     client = TranscriptClient(port)
 
@@ -332,6 +387,7 @@ def main() -> int:
 
     answer = ""
     failures: list[str] = []
+    prev_profile = setup_openclaude_profile(port) if args.client == "openclaude" else None
     try:
         if args.target == "mock":
             proxy.start_mock_onyx(args.mock_port)
@@ -360,11 +416,43 @@ def main() -> int:
             else:
                 failures.append("e) history-matched session reuse did not trigger on turn 2")
 
-        failures = verify(args, checker, workspace, answer)
+        checks = "a, b, c, d" + (", e" if args.client == "http" else "")
+
+        # Turn 3 (openclaude only): exercise a client-native tool (Agent
+        # sub-agent). The proxy must pass it through; the sub-agent's own
+        # requests also flow through the proxy. Fresh session (-c off):
+        # continued sessions tend to answer "nothing pending" without ever
+        # launching the sub-agent.
+        if args.client == "openclaude":
+            log("Turn 3: client-native Agent sub-agent request ...")
+            sub_answer = run_client(SUBAGENT_PROMPT, continue_session=False)
+            log(f"Sub-agent answer (first 300 chars): {sub_answer[:300]!r}")
+            proxy_log = open(proxy.log_path, encoding="utf-8").read()
+            passed_f = True
+            if "client-native tools" not in proxy_log:
+                failures.append("f) proxy log shows no client-native tool passthrough (Agent tool not seen)")
+                passed_f = False
+            # The sub-agent must have actually READ the file through the proxy:
+            # live -> real naming convention; mock -> deterministic file marker.
+            if args.target == "live":
+                content_ok = NAMING_ANSWER in sub_answer.lower()
+            else:
+                content_ok = "FILE_sample_utils_py.txt" in sub_answer
+            if not content_ok:
+                failures.append(
+                    f"f) sub-agent answer lacks expected file content; answer: {sub_answer[:500]!r}"
+                )
+                passed_f = False
+            if passed_f:
+                log("f) OK: client-native Agent tool passed through; sub-agent ran through the proxy")
+            checks += ", f"
+
+        failures.extend(verify(args, checker, workspace, answer))
     except Exception as exc:
         failures.append(f"harness error: {exc}")
     finally:
         proxy.stop()
+        restore_openclaude_profile(prev_profile)
         log(f"Workspace kept at {workspace} (proxy log: {proxy.log_path})")
 
     print("\n===== CYCLE RESULT =====")
@@ -372,7 +460,7 @@ def main() -> int:
         for f in failures:
             print(f"FAIL: {f}")
         return 1
-    print("ALL CHECKS PASSED (a, b, c, d)")
+    print(f"ALL CHECKS PASSED ({checks})")
     return 0
 
 
