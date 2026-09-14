@@ -374,13 +374,33 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                 all_executable = False
         return has_read_tool, non_read_tools, all_executable
 
-    def _run_tool_batch(self, all_tools: List[dict], non_read_tools: set) -> Tuple[List[str], List[str]]:
+    @staticmethod
+    def _split_tools(all_tools: List[dict]) -> Tuple[List[dict], List[str]]:
+        """Split a batch into server-executable local tools and client-native
+        tools (with their raw tag text for pass-through to the client)."""
+        local_tools = []
+        client_native_raws = []
+        for t in all_tools:
+            if (t.get("name") or "").lower().strip() in Orchestrator.SERVER_LOCAL_TOOLS:
+                local_tools.append(t)
+            elif t.get("raw"):
+                client_native_raws.append(t["raw"])
+        return local_tools, client_native_raws
+
+    def _run_tool_batch(self, all_tools: List[dict], non_read_tools: set,
+                        executed_signatures: Optional[set] = None) -> Tuple[List[str], List[str]]:
         """Execute an intercepted tool batch server-side. Returns
         (attached_headers, tool_result_entries) for the redispatch message.
 
         Read/grounding tools are synced in parallel (each is an independent
         Onyx upload+processing wait); non-read tools execute sequentially
-        in declaration order."""
+        in declaration order.
+
+        executed_signatures: when provided, a write tool whose normalized
+        signature (name + args) was already executed in this request is NOT
+        re-executed; the model gets a firm do-not-repeat note instead. This
+        breaks the re-write loop where the model re-emits an identical
+        write_file after every redispatch and burns the round budget."""
         attached_headers: List[str] = []
         tool_result_entries: List[str] = []
 
@@ -444,7 +464,22 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                     )
             else:
                 # Execute local non-read tool against workspace disk
+                sig = None
+                if executed_signatures is not None and t_name in {"write_file", "write", "create_file",
+                                                                  "edit_file", "modify_file", "save_file",
+                                                                  "replace_in_file"}:
+                    sig = (t_name, json.dumps(t_args, sort_keys=True, ensure_ascii=False))
+                    if sig in executed_signatures:
+                        logger.info("[AUTO-GROUNDING LOCAL TOOL] Skipping duplicate write '%s' (identical args already executed).", t.get("name"))
+                        tool_result_entries.append(
+                            f"- Tool '{t.get('name')}' output:\nIDENTICAL TOOL CALL ALREADY EXECUTED EARLIER: "
+                            "the file is already up to date with your content. "
+                            "Do NOT repeat this tool call. Continue with different work or give your final answer now."
+                        )
+                        continue
                 res_output = self.workspace_sync.execute_local_non_read_tool(t.get("name", ""), t_args)
+                if sig is not None:
+                    executed_signatures.add(sig)
                 logger.info("[AUTO-GROUNDING LOCAL TOOL] Executed non-read tool '%s': %s", t.get("name"), res_output[:120])
                 tool_result_entries.append(f"- Tool '{t.get('name')}' output:\n{res_output}")
 
@@ -559,6 +594,7 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
 
         current_message_to_send = message_for_persona
         redispatch_count = 0
+        executed_signatures: set = set()
         max_redispatches = MAX_REDISPATCHES
         rate_limit_retries = 0
         max_rate_limit_retries = 5
@@ -598,12 +634,24 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         if "<local_tool>" in buffered_output and "</local_tool>" in buffered_output and self.workspace_sync and redispatch_count < max_redispatches:
                             all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
                             has_read_tool, non_read_tools, all_executable = self._classify_tools(all_tools)
-                            if all_tools and not all_executable:
+                            # Split mixed batches: local tools are ALWAYS
+                            # executed server-side; only client-native tags
+                            # reach the client. Passing a mixed batch through
+                            # wholesale leaked tools like write_file to the
+                            # client ("Unknown tool write_file" failures).
+                            local_tools, client_native_raws = self._split_tools(all_tools)
+                            if all_tools and not all_executable and not local_tools:
                                 logger.info(
                                     "[AUTO-GROUNDING INTERCEPT] Batch contains client-native tools (%s); passing through to client.",
-                                    ", ".join(t.get("name", "?") for t in all_tools if (t.get("name") or "").lower() not in Orchestrator.SERVER_LOCAL_TOOLS),
+                                    ", ".join(t.get("name", "?") for t in all_tools),
                                 )
-                            if all_tools and all_executable:
+                            if all_tools and local_tools:
+                                if client_native_raws:
+                                    logger.info(
+                                        "[AUTO-GROUNDING INTERCEPT] Mixed batch: executing %d local tool(s) server-side, passing %d client-native tool(s) through.",
+                                        len(local_tools), len(client_native_raws),
+                                    )
+                                all_tools = local_tools
                                 intercepted_batch = True
 
                                 # A) Stream the model's preamble (text
@@ -620,6 +668,14 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                         streamed_anything = True
                                         yield preamble
 
+                                # Client-native tags go to the client verbatim
+                                # (it executes them with its own tools).
+                                for raw in client_native_raws:
+                                    if raw and raw in buffered_output:
+                                        chunks.append(raw)
+                                        streamed_anything = True
+                                        yield raw
+
                                 logger.info("[AUTO-GROUNDING INTERCEPT] Intercepted batch of %d tool call(s).", len(all_tools))
                                 get_run_logger().log_tool_call(
                                     tool_name="[AUTO_GROUNDING_BATCH]",
@@ -628,7 +684,8 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                     intercepted=True,
                                 )
 
-                                attached_headers, tool_result_entries = self._run_tool_batch(all_tools, non_read_tools)
+                                attached_headers, tool_result_entries = self._run_tool_batch(
+                                    all_tools, non_read_tools, executed_signatures=executed_signatures)
 
                                 # If another tag was started behind the batch but
                                 # not completed before the intercept, the model's
@@ -691,10 +748,20 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                     ):
                         all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
                         has_read_tool, non_read_tools, all_executable = self._classify_tools(all_tools)
-                        if all_tools and all_executable:
+                        local_tools, client_native_raws = self._split_tools(all_tools)
+                        if all_tools and local_tools:
                             logger.warning("[AUTO-GROUNDING INTERCEPT] Tag completed at stream end (missed by per-chunk check); intercepting now.")
+                            if client_native_raws:
+                                logger.info("[AUTO-GROUNDING INTERCEPT] Mixed end-of-round batch: executing %d local tool(s), passing %d client-native through.",
+                                            len(local_tools), len(client_native_raws))
+                                for raw in client_native_raws:
+                                    if raw and raw in buffered_output:
+                                        chunks.append(raw)
+                                        streamed_anything = True
+                                        yield raw
                             intercepted_batch = True
-                            attached_headers, tool_result_entries = self._run_tool_batch(all_tools, non_read_tools)
+                            attached_headers, tool_result_entries = self._run_tool_batch(
+                                local_tools, non_read_tools, executed_signatures=executed_signatures)
                             prompt_sections = []
                             if attached_headers:
                                 prompt_sections.append("\n".join(attached_headers))

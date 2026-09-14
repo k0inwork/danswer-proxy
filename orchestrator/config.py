@@ -52,7 +52,7 @@ WORKSPACE_EAGER_SYNC = (
 
 # Max intercept-and-redispatch tool rounds per client request. Each round the
 # model's local_tool calls are executed and the results are sent back to Onyx.
-MAX_REDISPATCHES = int(os.getenv("MAX_REDISPATCHES", "6"))
+MAX_REDISPATCHES = int(os.getenv("MAX_REDISPATCHES", "12"))
 
 # Attach READY file descriptors to every send-chat-message payload. Off by
 # default: sessions run under the default persona inside the workspace

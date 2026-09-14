@@ -49,10 +49,75 @@ SEED_CANONICAL = "FILE_sample_utils_py.txt"
 NAMING_ANSWER = "snake_case"
 
 
+SCENARIO_WS = os.path.join(HERE, ".scenario_workspace")
+
+
+def make_scenario_workspace(scenario: str, spec_path: str) -> str:
+    """Prepare a stable per-scenario workspace seeded with the spec.
+    Stable path => Onyx reuses the same workspace-<md5> project."""
+    ws = os.path.join(SCENARIO_WS, scenario)
+    os.makedirs(ws, exist_ok=True)
+    for stale in os.listdir(ws):
+        if stale != "workspace_sync_cache.json":
+            path = os.path.join(ws, stale)
+            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+    shutil.copyfile(spec_path, os.path.join(ws, "SPEC.md"))
+    return ws
+
+
+def verify_project_sync(checker: OnyxChecker, workspace: str, timeout: int,
+                        proxy_log_path: Optional[str] = None,
+                         expected_files: Optional[list] = None) -> list:
+    """Check consistency between what the proxy uploaded and what the Onyx
+    project contains. With on-demand sync (default) only files actually read
+    by a session are uploaded, so we verify every file the proxy log reports
+    as uploaded (except the TOP_FOLDER marker) is present in the project."""
+    import hashlib
+    import re as _re
+    failures = []
+    project_name = "workspace-" + hashlib.md5(
+        os.path.abspath(workspace).encode()
+    ).hexdigest()
+
+    uploaded = {}  # canonical -> abs path
+    if proxy_log_path and os.path.exists(proxy_log_path):
+        for m in _re.finditer(
+            r"\[FILE_UPLOAD\] \[SYNC\] file_path=(\S+) \| canonical_name=(FILE_\S+?\.txt) \|",
+            open(proxy_log_path, encoding="utf-8", errors="replace").read(),
+        ):
+            if m.group(2).startswith("FILE_"):
+                uploaded[m.group(2)] = m.group(1)
+    uploaded = {c: p for c, p in uploaded.items()
+                if os.path.abspath(os.path.dirname(p)) == os.path.abspath(workspace)}
+    log(f"sync check: proxy uploaded {len(uploaded)} workspace file(s): {sorted(uploaded)}")
+
+    if expected_files is None:
+        expected_files = [
+            n for n in sorted(os.listdir(workspace))
+            if not n.startswith(".") and n not in ("workspace_sync_cache.json", "session_history_cache.json")
+            and os.path.isfile(os.path.join(workspace, n))
+        ]
+    deadline = time.time() + timeout
+    overview = {}
+    while time.time() < deadline:
+        overview = checker.project_overview(project_name)
+        names = overview.get("file_names", [])
+        if overview.get("exists") and all(c in names for c in uploaded):
+            break
+        time.sleep(2)
+    names = overview.get("file_names", [])
+    for canonical in uploaded:
+        if canonical not in names:
+            failures.append(
+                f"sync: uploaded {uploaded[canonical]} ({canonical}) not in Onyx project "
+                f"'{project_name}' within {timeout}s; project files: {names}"
+            )
+        else:
+            log(f"sync OK: {uploaded[canonical]} -> {canonical}")
+    return failures
+
+
 def make_workspace() -> str:
-    """Prepare the fixed cycle workspace. The folder path is stable, so Onyx
-    reuses the same `workspace-<md5>` project across runs (existing files are
-    refreshed in place via the watcher's hash-based sync)."""
     os.makedirs(CYCLE_WS, exist_ok=True)
     for stale in os.listdir(CYCLE_WS):
         if stale != "workspace_sync_cache.json":
