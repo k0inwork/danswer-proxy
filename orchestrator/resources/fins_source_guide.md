@@ -18,24 +18,40 @@ are read-only and do not change while you work.
 
 ## 2. The fins3 URL grammar
 
-Every fins3 document is identified by a uniform `(source, url)` pair:
+Every fins3 document is identified by a uniform `(source, url)` pair.
+**Everything is listable**: every level of the tree below can be listed,
+so you can always browse from the top down to a concrete document.
 
 | URL | Content |
 |---|---|
 | `fins3://db/<host>/<schema>/<event>` | Pseudocode of one booking event, resolved on the host's live database (inheritance applied) |
+| `fins3://db/<host>/Agreements/<agrId>.md` | One agreement document (conditions, value sets, overrides) |
 | `fins3://git/<ref>/<schema>/<event>` | The same event as defined in a VCS revision (`/` in refs is encoded `~`, e.g. `release~2`) |
 | `fins3://runs/<run-id>.md` | A run log document |
+
+Listing levels (each is a directory you can list):
+
+- `fins3://db` → hosts (each host = one bank)
+- `fins3://db/<host>` → `Agreements/` plus all schemas
+- `fins3://db/<host>/<schema>` → that schema's events (inherited included)
+- `fins3://db/<host>/Agreements` → agreement ids
+- `fins3://git` → refs (branches and tags of the indexed repos)
+- `fins3://git/<ref>` → schemas known in the OpenGrok schema index
+- `fins3://git/<ref>/<schema>` → events defined at that ref (with
+  inherited-event annotations from the file's `addRelation` chain)
+- `fins3://runs` → run ids
 
 Examples:
 
 - `fins3://db/eurobank/EBBG.Acceptance_ED/PURCHASE`
+- `fins3://db/eurobank/Agreements/AGR-100234.md`
 - `fins3://git/release~2/EBBG.Acceptance_ED/PURCHASE`
 - `fins3://runs/2026-09-14T10-12-33.md`
 
 The `source` part of the URL selects the backend: `db` resolves events
-through the schema inheritance chain on a bank host; `git` and `file`
-kinds read one schema file (an event name that exists in several schemas
-needs the `schema` qualifier).
+through the schema inheritance chain on a bank host; `git` reads one
+schema file at a ref (an event name that exists in several schemas needs
+the `schema` qualifier); `runs` serves run logs.
 
 ## 3. Domain model — how the objects relate
 
@@ -60,7 +76,10 @@ needs the `schema` qualifier).
   bookings (`prod_class` → schema).
 - **Agreements** are instantiated from products: the product's booking schema
   and condition configuration are the blueprint for an agreement. Agreements
-  may override condition values per agreement.
+  carry status lifecycle (`status`, `statusDate`, `openDate`), map to several
+  schemas (book, pricing, diversion, MDE), and may override condition values
+  per agreement. They are listed per host (optionally per product) and each
+  agreement is one document under `fins3://db/<host>/Agreements/`.
 - **Conditions** are fees/rates/rules, identified by condition indexes
   (`cond_<idx>`, e.g. `cond_1001`), grouped by purpose, with value sets per
   schema (`effectiveDate`, currency, min/base/max amounts, rates) and
@@ -87,6 +106,11 @@ CONDITIONS ──overridden per──▶ AGREEMENT
   schema → read an event's pseudocode.
 - **From product to booking logic**: list owners → list products of an
   owner → resolve the product's schema → list that schema's events.
+- **Agreements of a bank**: list `fins3://db/<host>/Agreements/` → read the
+  agreement document (its condition value sets and overrides).
+- **Compare code revisions**: pick a ref under `fins3://git/` → list or
+  query a schema's events at that ref → read the event as it was defined
+  there.
 - **Find where an event is really defined**: resolve through the chain
   (`definedIn`/`via` semantics) — the pseudocode URL can be built for the
   defining schema.
@@ -96,9 +120,12 @@ CONDITIONS ──overridden per──▶ AGREEMENT
 ## 5. Capabilities and limits
 
 - fins3 sources are **read-only** — there are no write tools for them.
-- `db` sources resolve inheritance automatically; `git` sources read a
-  single revision and cannot enumerate schemas (only events of a known
-  schema).
+- Everything is listable: hosts, schemas, events, agreement ids, git refs
+  (branches and tags), git schemas, git events, run ids. Note that `git`
+  schema/event listings come from the OpenGrok index and branch cache, so a
+  freshly pushed branch may appear with a short delay.
+- `db` sources resolve inheritance automatically; the `inheritedEvents`
+  annotations tell you which schema in the chain actually defines an event.
 - Freshness is checked per read (etag): a changed source is re-attached
   under the same `SOURCE_*` name automatically. There is no background
   monitoring of fins3 sources.
