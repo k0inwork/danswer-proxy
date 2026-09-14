@@ -21,3 +21,5 @@ harness/.cycle_workspace/
 harness/.cycle_proxy.log
 danswer_proxy.egg-info/
 session_history_cache.json
+
+harness/.scenario_workspace/
