@@ -5,6 +5,7 @@ Thread-safe conversation store for active segments, compacting context, and dete
 import hashlib
 import json
 import os
+import re
 import time
 from threading import Lock
 from typing import Any, Dict, List, Optional
@@ -14,35 +15,46 @@ from orchestrator.models import Segment
 
 
 class HistorySessionIndex:
-    """Maps client chat-history prefixes to proxy conversation IDs.
+    """Maps client chat histories to proxy conversation IDs for ID-less
+    clients (e.g. openclaude) that resend the transcript each request.
 
-    ID-less clients (e.g. openclaude) resend the full transcript with every
-    request. The digest sequence of the user messages identifies the
-    conversation: if some known conversation's digest list is a prefix of the
-    incoming one, that conversation (and its Onyx session with the whole
-    accumulated history) is reused. Otherwise a new conversation starts.
-    The index is persisted so proxy restarts do not orphan open sessions."""
+    The client may rewrite earlier messages between turns (stripping
+    ephemeral context), so exact digests never match. Instead a conversation
+    is identified by the normalized head of its first user message plus the
+    running user-message count: a request whose count is equal to or one
+    more than the stored one (and with the same head) continues that
+    conversation's Onyx session. The index is persisted so proxy restarts do
+    not orphan open sessions."""
 
     MAX_ENTRIES = 50
+    HEAD_CHARS = 200
 
     def __init__(self, cache_file: str):
         self.cache_file = cache_file
         self._lock = Lock()
-        # conversation_id -> {"digests": [...], "last_used": epoch}
+        # conversation_id -> {"head": str, "count": int, "last_used": epoch}
         self._entries: Dict[str, Dict[str, Any]] = {}
         self._load()
 
-    @staticmethod
-    def digest_user_messages(messages: List[Dict[str, Any]]) -> List[str]:
-        """Per-message sha256 digests of user message contents, in order."""
-        digests = []
+    @classmethod
+    def head_of(cls, messages: List[Dict[str, Any]]) -> str:
+        """Normalized head (first user message, first HEAD_CHARS chars).
+
+        Volatile blocks the client injects/rewrites between turns (e.g.
+        <system-reminder>...) are stripped before hashing."""
         for m in messages or []:
             if isinstance(m, dict) and m.get("role") == "user":
                 content = m.get("content")
                 if not isinstance(content, str):
                     content = json.dumps(content, ensure_ascii=False, default=str)
-                digests.append(hashlib.sha256(content.encode("utf-8")).hexdigest())
-        return digests
+                content = re.sub(r"<system-reminder>.*?</system-reminder>", "", content, flags=re.DOTALL)
+                normalized = re.sub(r"\s+", " ", content).strip().lower()
+                return hashlib.sha256(normalized[:cls.HEAD_CHARS].encode("utf-8")).hexdigest()
+        return ""
+
+    @classmethod
+    def user_count(cls, messages: List[Dict[str, Any]]) -> int:
+        return sum(1 for m in (messages or []) if isinstance(m, dict) and m.get("role") == "user")
 
     def _load(self) -> None:
         try:
@@ -62,35 +74,38 @@ class HistorySessionIndex:
         except Exception as e:
             logger.warning("Failed to save history session index: %s", e)
 
-    def match(self, digests: List[str]) -> Optional[str]:
-        """Return the conversation whose digest list is a prefix of `digests`
-        (longest match wins), or None."""
-        if not digests:
+    def match(self, head: str, count: int) -> Optional[str]:
+        """Return the conversation with the same head whose stored user count
+        is <= the incoming count (continuation or client retry), or None."""
+        if not head:
             return None
         with self._lock:
-            best_id, best_len = None, 0
+            best_id, best_count = None, -1
             for conv_id, entry in self._entries.items():
-                stored = entry.get("digests") or []
-                n = min(len(stored), len(digests))
-                if n > best_len and stored[:n] == digests[:n] and len(stored) <= len(digests):
-                    best_id, best_len = conv_id, n
+                if entry.get("head") != head:
+                    continue
+                stored_count = entry.get("count", 0)
+                if stored_count <= count and stored_count > best_count:
+                    best_id, best_count = conv_id, stored_count
             if best_id is not None:
                 self._entries[best_id]["last_used"] = time.time()
-                self._entries[best_id]["digests"] = list(digests)
+                self._entries[best_id]["count"] = count
                 self._save()
-                logger.info("History match: reusing conversation %s (%d user messages).", best_id, len(digests))
+                logger.info(
+                    "History match: reusing conversation %s (user message %d).", best_id, count
+                )
             return best_id
 
-    def register(self, digests: List[str]) -> str:
-        """Register (or update) a conversation for a digest sequence and
+    def register(self, head: str, count: int) -> str:
+        """Register (or update) a conversation for a head/count pair and
         return its conversation ID."""
         with self._lock:
             # Reap stale entries beyond the cap (LRU by last_used)
             if len(self._entries) >= self.MAX_ENTRIES:
                 oldest = min(self._entries, key=lambda k: self._entries[k].get("last_used", 0))
                 self._entries.pop(oldest, None)
-            conv_id = f"hist-{hashlib.sha256((''.join(digests)).encode()).hexdigest()[:12]}"
-            self._entries[conv_id] = {"digests": list(digests), "last_used": time.time()}
+            conv_id = f"hist-{hashlib.sha256(head.encode()).hexdigest()[:12]}"
+            self._entries[conv_id] = {"head": head, "count": count, "last_used": time.time()}
             self._save()
             return conv_id
 

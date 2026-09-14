@@ -77,37 +77,46 @@ class TestHistorySessionIndex(unittest.TestCase):
         if os.path.exists(self.path):
             os.remove(self.path)
 
-    def _digests(self, *texts):
-        import hashlib
-        return [hashlib.sha256(t.encode()).hexdigest() for t in texts]
+    def _msgs(self, *texts):
+        out = []
+        for t in texts:
+            out.append({"role": "user", "content": t})
+            out.append({"role": "assistant", "content": "ok"})
+        return out
 
-    def test_register_and_prefix_match(self):
+    def test_register_and_continuation_match(self):
         idx = self.cls(self.path)
-        dd = self._digests("hello", "continue")
-        conv = idx.register(dd[:1])
-        # transcript grew by one message -> prefix match, same conversation
-        self.assertEqual(idx.match(dd), conv)
+        m1 = self._msgs("please read the file foo.py and tell me things")
+        conv = idx.register(self.cls.head_of(m1), self.cls.user_count(m1))
+        # turn 2: client rewrites the first message slightly (trailing context
+        # stripped) and adds a second user message -> still matches
+        m2 = self._msgs("please read the file foo.py and tell me things", "now edit it")
+        m2[0]["content"] = m2[0]["content"] + "\n<system-reminder>ephemeral</system-reminder>"
+        self.assertEqual(idx.match(self.cls.head_of(m2), self.cls.user_count(m2)), conv)
 
     def test_exact_retry_matches(self):
         idx = self.cls(self.path)
-        d1 = self._digests("hello")
-        conv = idx.register(d1)
-        self.assertEqual(idx.match(d1), conv)
+        m1 = self._msgs("hello there")
+        conv = idx.register(self.cls.head_of(m1), self.cls.user_count(m1))
+        self.assertEqual(idx.match(self.cls.head_of(m1), self.cls.user_count(m1)), conv)
 
     def test_no_match_for_different_history(self):
         idx = self.cls(self.path)
-        idx.register(self._digests("hello"))
-        self.assertIsNone(idx.match(self._digests("different question")))
+        m1 = self._msgs("question about databases")
+        idx.register(self.cls.head_of(m1), self.cls.user_count(m1))
+        m2 = self._msgs("completely different question about cooking")
+        self.assertIsNone(idx.match(self.cls.head_of(m2), self.cls.user_count(m2)))
 
-    def test_no_match_when_incoming_is_shorter(self):
+    def test_no_match_when_incoming_count_is_lower(self):
         idx = self.cls(self.path)
-        d1, d2 = self._digests("a", "b")
-        idx.register([d1, d2])
-        self.assertIsNone(idx.match([d1]))
+        m2 = self._msgs("first", "second")
+        idx.register(self.cls.head_of(m2), self.cls.user_count(m2))
+        m1 = self._msgs("first")
+        self.assertIsNone(idx.match(self.cls.head_of(m1), self.cls.user_count(m1)))
 
     def test_persistence_across_instances(self):
-        d1 = self._digests("persist me")
+        m1 = self._msgs("persist me")
         idx = self.cls(self.path)
-        conv = idx.register(d1)
+        conv = idx.register(self.cls.head_of(m1), self.cls.user_count(m1))
         idx2 = self.cls(self.path)
-        self.assertEqual(idx2.match(d1), conv)
+        self.assertEqual(idx2.match(self.cls.head_of(m1), self.cls.user_count(m1)), conv)

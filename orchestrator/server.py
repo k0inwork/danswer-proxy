@@ -96,8 +96,9 @@ def chat_completions():
         global history_index
         if history_index is None:
             history_index = HistorySessionIndex(SESSION_HISTORY_CACHE_FILE)
-        digests = history_index.digest_user_messages(messages)
-        conversation_id = history_index.match(digests) or history_index.register(digests)
+        head = history_index.head_of(messages)
+        count = history_index.user_count(messages)
+        conversation_id = history_index.match(head, count) or history_index.register(head, count)
 
     req_model = data.get("model")
     if req_model and isinstance(req_model, str):
