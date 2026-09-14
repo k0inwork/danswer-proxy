@@ -350,25 +350,77 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
             project_id=project_id,
         )
 
+    # Tools the proxy executes server-side. Anything else emitted via
+    # <local_tool> (e.g. openclaude's native 'Agent'/Task tool) must be passed
+    # through to the client as an OpenAI tool_call so the real client executes
+    # it — stub-executing unknown tools would silently no-op them.
+    SERVER_LOCAL_TOOLS = {"read_file", "read", "view", "cat", "view_file",
+                          "write_file", "write", "create_file", "edit_file",
+                          "modify_file", "save_file", "replace_in_file",
+                          "list_dir", "ls", "dir", "grep_search", "grep",
+                          "search_code", "ask_persona", "persona", "analyst"}
+
     @staticmethod
-    def _classify_tools(all_tools: List[dict]) -> Tuple[bool, set]:
+    def _classify_tools(all_tools: List[dict]) -> Tuple[bool, set, bool]:
         write_tools = {"write_file", "write", "create_file", "edit_file", "modify_file", "save_file", "replace_in_file"}
         non_read_tools = {"list_dir", "ls", "dir", "grep_search", "grep", "search_code"} | write_tools
         has_read_tool = False
+        all_executable = True
         for t in all_tools:
             t_name = (t.get("name") or "").lower().strip()
             t_args = t.get("arguments") or {}
             t_fp = t_args.get("file_path") or t_args.get("path")
             if t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools):
                 has_read_tool = True
-                break
-        return has_read_tool, non_read_tools
+            if t_name not in Orchestrator.SERVER_LOCAL_TOOLS:
+                all_executable = False
+        return has_read_tool, non_read_tools, all_executable
 
     def _run_tool_batch(self, all_tools: List[dict], non_read_tools: set) -> Tuple[List[str], List[str]]:
         """Execute an intercepted tool batch server-side. Returns
-        (attached_headers, tool_result_entries) for the redispatch message."""
+        (attached_headers, tool_result_entries) for the redispatch message.
+
+        Read/grounding tools are synced in parallel (each is an independent
+        Onyx upload+processing wait); non-read tools execute sequentially
+        in declaration order."""
         attached_headers: List[str] = []
         tool_result_entries: List[str] = []
+
+        def _sync_one(t: dict):
+            t_args = t.get("arguments") or {}
+            t_fp = t_args.get("file_path") or t_args.get("path")
+            desc = self.workspace_sync.upload_and_attach_blocking(t_fp)
+            canonical = desc.canonical_name if (desc and desc.canonical_name) else self.workspace_sync.canonical_name(t_fp, is_dir=False)
+            ok = bool(desc and desc.status == DescriptorStatus.READY)
+            return t, t_fp, canonical, ok
+
+        read_tools = [
+            t for t in all_tools
+            if ((t.get("name") or "").lower().strip() in {"read_file", "read", "view", "cat", "view_file"}
+                or ((t.get("arguments") or {}).get("file_path") and (t.get("name") or "").lower().strip() not in non_read_tools))
+        ]
+        if len(read_tools) > 1 and self.workspace_sync:
+            logger.info("[AUTO-GROUNDING SYNC] Parallel batch sync of %d files.", len(read_tools))
+            futures = [(t, self.workspace_sync.executor.submit(_sync_one, t)) for t in read_tools]
+            results = []
+            for t, fut in futures:
+                try:
+                    results.append(fut.result(timeout=120))
+                except Exception as exc:
+                    t_args = t.get("arguments") or {}
+                    results.append((t, t_args.get("file_path") or t_args.get("path") or "", "", False))
+                    logger.warning("Parallel sync failed for %s: %s", t_args, exc)
+        else:
+            results = []
+            for t in all_tools:
+                t_name = (t.get("name") or "").lower().strip()
+                t_args = t.get("arguments") or {}
+                t_fp = t_args.get("file_path") or t_args.get("path")
+                is_read = t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools)
+                if is_read and t_fp:
+                    results.append(_sync_one(t))
+
+        results_by_tool = { id(t): (t, t_fp, canonical, ok) for (t, t_fp, canonical, ok) in results }
 
         for t in all_tools:
             t_name = (t.get("name") or "").lower().strip()
@@ -377,10 +429,11 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
             is_read = t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools)
 
             if is_read and t_fp:
-                logger.info("[AUTO-GROUNDING SYNC] Blocking sync for file: '%s'", t_fp)
-                desc = self.workspace_sync.upload_and_attach_blocking(t_fp)
-                canonical = desc.canonical_name if (desc and desc.canonical_name) else self.workspace_sync.canonical_name(t_fp, is_dir=False)
-                if desc and desc.status == DescriptorStatus.READY:
+                res = results_by_tool.get(id(t))
+                if not res:
+                    continue
+                _, t_fp, canonical, ok = res
+                if ok:
                     attached_headers.append(f"FILE {t_fp} was attached as {canonical}")
                     tool_result_entries.append(f"- Tool '{t.get('name')}' ({t_fp}): Attached and indexed in project context as {canonical}.")
                     get_run_logger().log_tool_call(
@@ -552,9 +605,13 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         # Check for tool call intercept opportunity before streaming to client
                         if "<local_tool>" in buffered_output and "</local_tool>" in buffered_output and self.workspace_sync and redispatch_count < max_redispatches:
                             all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
-                            if all_tools:
-                                has_read_tool, non_read_tools = self._classify_tools(all_tools)
-
+                            has_read_tool, non_read_tools, all_executable = self._classify_tools(all_tools)
+                            if all_tools and not all_executable:
+                                logger.info(
+                                    "[AUTO-GROUNDING INTERCEPT] Batch contains client-native tools (%s); passing through to client.",
+                                    ", ".join(t.get("name", "?") for t in all_tools if (t.get("name") or "").lower() not in Orchestrator.SERVER_LOCAL_TOOLS),
+                                )
+                            if all_tools and all_executable:
                                 intercepted_batch = True
 
                                 # A) Stream the model's preamble (text
@@ -639,9 +696,9 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                         and redispatch_count < max_redispatches
                     ):
                         all_tools = DanswerClient.extract_all_local_tool_invocations(buffered_output)
-                        if all_tools:
+                        has_read_tool, non_read_tools, all_executable = self._classify_tools(all_tools)
+                        if all_tools and all_executable:
                             logger.warning("[AUTO-GROUNDING INTERCEPT] Tag completed at stream end (missed by per-chunk check); intercepting now.")
-                            has_read_tool, non_read_tools = self._classify_tools(all_tools)
                             intercepted_batch = True
                             attached_headers, tool_result_entries = self._run_tool_batch(all_tools, non_read_tools)
                             prompt_sections = []
@@ -656,10 +713,15 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                             redispatch_count += 1
                             continue
                         else:
-                            logger.warning(
-                                "[AUTO-GROUNDING INTERCEPT] Completed tag present but no tools extracted; buffered tail: %r",
-                                buffered_output[-300:],
-                            )
+                            if all_tools and not all_executable:
+                                logger.info(
+                                    "[AUTO-GROUNDING INTERCEPT] End-of-round batch contains client-native tools; passing through to client."
+                                )
+                            else:
+                                logger.warning(
+                                    "[AUTO-GROUNDING INTERCEPT] Completed tag present but no tools extracted; buffered tail: %r",
+                                    buffered_output[-300:],
+                                )
 
                     if not intercepted_batch:
                         if not streamed_anything:
