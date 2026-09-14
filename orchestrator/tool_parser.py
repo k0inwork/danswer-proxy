@@ -73,7 +73,35 @@ def safe_parse_tool_arguments(raw_args: str, tool_name: str = "") -> Dict[str, A
     return {"_raw": raw_args}
 
 
+def _normalize_malformed_tag_closings(answer: str) -> str:
+    """Repair <local_tool> blocks whose closing tags got polluted by the
+    client's native tool-call dialect (e.g. '<arguments>{...}</parameter>
+    </invoke>' instead of '</arguments></local_tool>'), so the extractor can
+    match them."""
+    def _fix(m: "re.Match") -> str:
+        block = m.group(0)
+        if "</local_tool>" in block:
+            return block
+        args_end = block.find("</arguments>")
+        if args_end != -1:
+            return block[: args_end + len("</arguments>")] + "</local_tool>"
+        # '</arguments>' missing entirely: close args right before the
+        # polluted tail and close the tool tag.
+        tail = re.search(r"</parameter>\s*</invoke>|</invoke>", block, flags=re.IGNORECASE)
+        if tail:
+            return block[: tail.start()] + "</arguments></local_tool>"
+        return block
+
+    return re.sub(
+        r"<local_tool>(?:(?!</local_tool>).)*?(?:</parameter>\s*</invoke>|</invoke>)",
+        _fix,
+        answer,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
 def extract_all_local_tool_invocations(answer: str) -> List[dict]:
+    answer = _normalize_malformed_tag_closings(answer)
     matches = re.finditer(
         r"<local_tool>\s*<name>\s*([^<]+?)\s*</name>\s*"
         r"<arguments>\s*(.*?)\s*</arguments>\s*</local_tool>",

@@ -1,4 +1,4 @@
-# Harness — proxy verification cycle
+# Harness  proxy verification cycle
 
 ## Run the proxy from anywhere (pipx)
 
@@ -27,7 +27,7 @@ or the **real Onyx suite**:
 2. Starts the proxy (`app.py -f <workspace>`) plus either the mock Onyx server or the real
    suite via ambient `DANSWER_URL` / `DANSWER_API_TOKEN`.
 3. Drives a client (direct OpenAI-compatible HTTP by default, or openclaude CLI) through:
-   - Turn 1: comprehension question about the attached file
+    - Turn 1: comprehension question about the attached file
    - Turn 2: a file edit (write_file through the workspace tool bridge)
 4. Verifies:
    - **a)** the single uploaded file is registered in the Onyx project
@@ -44,11 +44,15 @@ python harness/run_cycle.py --client openclaude      # openclaude CLI as client
 python harness/run_cycle.py --sync-timeout 120
 ```
 
-Exit code 0 = all checks (a–d) passed; 1 = list of failures; 2 = missing env.
+Exit code 0 = all checks (ad) passed; 1 = list of failures; 2 = missing env.
 
 ## Files
 
-- `run_cycle.py` — the driver (workspace, mock/proxy lifecycle, client, verification)
-- `onyx_check.py` — Onyx API inspection helpers (project files, blob content)
-- `.cycle_workspace/` — fixed reuse workspace (gitignored)
-- `.cycle_proxy.log` — proxy + mock output from the last run (gitignored)
+- `run_cycle.py`  the driver (workspace, mock/proxy lifecycle, client, verification)
+- `onyx_check.py`  Onyx API inspection helpers (project files, blob content)
+- `.cycle_workspace/`  fixed reuse workspace (gitignored)
+- `.cycle_proxy.log`  proxy + mock output from the last run (gitignored)
+
+---
+
+_Last updated: 2026-09-14_
