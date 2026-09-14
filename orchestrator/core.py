@@ -339,12 +339,10 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
         return result
 
     def get_or_create_initial_segment(self, conversation_id: str) -> Segment:
-        active = self.sessions.get_active(conversation_id)
-        if active is not None:
-            return active
-
         project_id = self.workspace_sync.project_id if self.workspace_sync else None
-        return self.sessions.create_segment(
+        # Atomic check-and-create: concurrent requests for the same
+        # conversation cannot spawn duplicate Onyx sessions.
+        return self.sessions.get_or_create(
             conversation_id=conversation_id,
             persona_id=PRIMARY_PERSONA_ID,
             project_id=project_id,
@@ -394,42 +392,36 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
             ok = bool(desc and desc.status == DescriptorStatus.READY)
             return t, t_fp, canonical, ok
 
-        read_tools = [
-            t for t in all_tools
+        read_indices = [
+            i for i, t in enumerate(all_tools)
             if ((t.get("name") or "").lower().strip() in {"read_file", "read", "view", "cat", "view_file"}
                 or ((t.get("arguments") or {}).get("file_path") and (t.get("name") or "").lower().strip() not in non_read_tools))
         ]
-        if len(read_tools) > 1 and self.workspace_sync:
-            logger.info("[AUTO-GROUNDING SYNC] Parallel batch sync of %d files.", len(read_tools))
-            futures = [(t, self.workspace_sync.executor.submit(_sync_one, t)) for t in read_tools]
-            results = []
-            for t, fut in futures:
+        results: Dict[int, tuple] = {}
+        if len(read_indices) > 1 and self.workspace_sync:
+            logger.info("[AUTO-GROUNDING SYNC] Parallel batch sync of %d files.", len(read_indices))
+            futures = [(i, self.workspace_sync.executor.submit(_sync_one, all_tools[i])) for i in read_indices]
+            for i, fut in futures:
                 try:
-                    results.append(fut.result(timeout=120))
+                    results[i] = fut.result(timeout=120)
                 except Exception as exc:
-                    t_args = t.get("arguments") or {}
-                    results.append((t, t_args.get("file_path") or t_args.get("path") or "", "", False))
+                    t_args = all_tools[i].get("arguments") or {}
+                    results[i] = (all_tools[i], t_args.get("file_path") or t_args.get("path") or "", "", False)
                     logger.warning("Parallel sync failed for %s: %s", t_args, exc)
         else:
-            results = []
-            for t in all_tools:
-                t_name = (t.get("name") or "").lower().strip()
-                t_args = t.get("arguments") or {}
-                t_fp = t_args.get("file_path") or t_args.get("path")
-                is_read = t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools)
-                if is_read and t_fp:
-                    results.append(_sync_one(t))
+            for i in read_indices:
+                results[i] = _sync_one(all_tools[i])
 
-        results_by_tool = { id(t): (t, t_fp, canonical, ok) for (t, t_fp, canonical, ok) in results }
+        results_by_index = dict(results)
 
-        for t in all_tools:
+        for idx, t in enumerate(all_tools):
             t_name = (t.get("name") or "").lower().strip()
             t_args = t.get("arguments") or {}
             t_fp = t_args.get("file_path") or t_args.get("path")
             is_read = t_name in {"read_file", "read", "view", "cat", "view_file"} or (t_fp and t_name not in non_read_tools)
 
             if is_read and t_fp:
-                res = results_by_tool.get(id(t))
+                res = results_by_index.get(idx)
                 if not res:
                     continue
                 _, t_fp, canonical, ok = res

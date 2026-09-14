@@ -86,6 +86,12 @@ PRIMARY_PERSONA_ID = 0
 # local-tool instructions. Set PERSONA_SWITCHER=1 to enable.
 ENABLE_PERSONA_SWITCHER = os.getenv("PERSONA_SWITCHER", "0") == "1"
 
+# Composability guard: a CUSTOM persona suppresses Onyx's project-file
+# injection, so with the switcher on, per-message descriptors MUST be
+# attached or every switched session is blind to workspace files.
+if ENABLE_PERSONA_SWITCHER and not ATTACH_DESCRIPTORS:
+    ATTACH_DESCRIPTORS = True
+
 # model_id -> (display_name, provider, version_for_api)
 MODELS = {
     "claude-sonnet-4.6": (

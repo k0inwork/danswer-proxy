@@ -85,7 +85,9 @@ class HistorySessionIndex:
                 if entry.get("head") != head:
                     continue
                 stored_count = entry.get("count", 0)
-                if stored_count <= count and stored_count > best_count:
+                # Same opening + small count step = continuation; a large gap
+                # means a different conversation that happens to share the head.
+                if stored_count <= count and (count - stored_count) <= 2 and stored_count > best_count:
                     best_id, best_count = conv_id, stored_count
             if best_id is not None:
                 self._entries[best_id]["last_used"] = time.time()
@@ -118,6 +120,40 @@ class ConversationStore:
         self._detector_sessions: Dict[str, str] = {}
         self._next_segment_id = 1
 
+    def get_or_create(
+        self,
+        conversation_id: str,
+        persona_id: int,
+        project_id: Optional[str] = None,
+        inherited_context: str = "",
+    ) -> Segment:
+        """Atomically return the ACTIVE segment or create one. The check
+        happens under the lock; the network call happens outside it; a lost
+        race re-checks under the lock and discards the surplus session."""
+        with self._lock:
+            segments = self._segments.get(conversation_id, [])
+            active = [s for s in segments if s.status == "ACTIVE"]
+            if active:
+                return active[-1]
+        session_id = self.client.create_chat_session(
+            persona_id=persona_id, project_id=project_id, kind="segment"
+        )
+        with self._lock:
+            segments = self._segments.get(conversation_id, [])
+            active = [s for s in segments if s.status == "ACTIVE"]
+            if active:  # lost race: keep the winner's segment, drop ours
+                try:
+                    self.client.delete_chat_session(session_id, kind="segment")
+                except Exception:
+                    pass
+                return active[-1]
+        return self.create_segment(
+            conversation_id=conversation_id,
+            persona_id=persona_id,
+            project_id=project_id,
+            inherited_context=inherited_context,
+        )
+
     def get_active(self, conversation_id: str) -> Optional[Segment]:
         with self._lock:
             segments = self._segments.get(conversation_id, [])
@@ -141,6 +177,17 @@ class ConversationStore:
             except Exception as e:
                 logger.warning("Failed to delete remote detector session=%s: %s", session_id, e)
 
+    MAX_SEGMENTS_PER_CONVERSATION = 10
+
+    def _evict_closed(self, conversation_id: str) -> None:
+        """Caller must hold the lock. Keeps closed segments under the cap."""
+        segments_list = self._segments.get(conversation_id, [])
+        closed = [seg for seg in segments_list if seg.status != "ACTIVE"]
+        while len(closed) > self.MAX_SEGMENTS_PER_CONVERSATION - 1:
+            oldest = closed.pop(0)
+            if oldest in segments_list:
+                segments_list.remove(oldest)
+
     def create_segment(
         self,
         conversation_id: str,
@@ -148,12 +195,15 @@ class ConversationStore:
         project_id: Optional[str] = None,
         inherited_context: str = "",
     ) -> Segment:
+        # Network I/O outside the lock
+        session_id = self.client.create_chat_session(
+            persona_id=persona_id,
+            project_id=project_id,
+            kind="segment",
+        )
         with self._lock:
-            session_id = self.client.create_chat_session(
-                persona_id=persona_id,
-                project_id=project_id,
-                kind="segment",
-            )
+            self._evict_closed(conversation_id)
+
             segment = Segment(
                 segment_id=self._next_segment_id,
                 persona_id=persona_id,

@@ -746,13 +746,23 @@ class WorkspaceProjectSync:
             logger.info("Stopped async background file watcher thread.")
 
     def _background_watcher_loop(self, poll_interval: float) -> None:
+        error_streak = 0
         while not self._stop_watcher.is_set():
             try:
                 self.update_top_folder()
                 self.sync_root_files()
                 self.check_and_refresh_watched_files()
+                error_streak = 0
             except Exception as exc:
-                logger.debug("Error in background file watcher loop: %s", exc)
+                error_streak += 1
+                # Exponential backoff when Onyx is unreachable etc.
+                backoff = min(poll_interval * (2 ** min(error_streak, 5)), 120.0)
+                logger.warning(
+                    "Error in background file watcher loop (streak=%d): %s — backing off %.0fs",
+                    error_streak, exc, backoff,
+                )
+                self._stop_watcher.wait(timeout=backoff)
+                continue
 
             self._stop_watcher.wait(timeout=poll_interval)
 
