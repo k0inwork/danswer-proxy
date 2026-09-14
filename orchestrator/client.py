@@ -104,13 +104,10 @@ class DanswerClient:
     @staticmethod
     def _extract_status(file_obj: Dict[str, Any]) -> str:
         status = str(file_obj.get("status") or "").upper()
-        if not status:
-            # Older shapes signal completion only by chunk/token counters being set
-            if file_obj.get("chunk_count") is not None:
-                status = "COMPLETED"
-            else:
-                status = "COMPLETED"
-        return status
+        # Older shapes signal completion only by counters being set; without
+        # any signal assume COMPLETED (the status endpoint is authoritative
+        # for FAILED states when present).
+        return status or "COMPLETED"
 
     def wait_for_file_processing(
         self,
@@ -592,7 +589,7 @@ class DanswerClient:
             "stream": stream,
             "include_citations": False,
         }
-        if model is not None:
+        if model is not None and model in MODELS:
             payload["llm_override"] = {
                 "temperature": temperature,
                 "model_provider": MODELS[model][1],
@@ -650,7 +647,7 @@ class DanswerClient:
             line = raw_line.strip()
             line_count += 1
             if line_count <= 15 or line_count % 20 == 0:
-                logger.info("DEBUG STREAM line_count=%d: %s", line_count, line[:200])
+                logger.debug("DEBUG STREAM line_count=%d: %s", line_count, line[:200])
             if line.startswith("data:"):
                 line = line[5:].strip()
             if line == "[DONE]":
@@ -658,7 +655,7 @@ class DanswerClient:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
-                logger.info("DEBUG STREAM json error on line_count=%d: %r", line_count, line[:150])
+                logger.debug("DEBUG STREAM json error on line_count=%d: %r", line_count, line[:150])
                 continue
 
             if not isinstance(event, dict):

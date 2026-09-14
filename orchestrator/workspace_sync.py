@@ -55,13 +55,16 @@ class WorkspaceProjectSync:
             desc.user_file_id = user_file_id or None
             desc.file_type = file_type
             desc.status = DescriptorStatus.UPLOADED
+            # Capture fields needed after the lock is released
+            log_path = desc.file_path
+            log_project_id = desc.project_id
             logger.info("CALLBACK [UPLOADED]: '%s' assigned ID=%s (user_file_id=%s)", canonical, file_id, user_file_id or "-")
 
         get_run_logger().log_file_upload(
-            file_path=desc.file_path,
+            file_path=log_path,
             canonical_name=canonical,
             file_id=file_id,
-            project_id=desc.project_id,
+            project_id=log_project_id,
             status="UPLOADED",
         )
 
@@ -198,7 +201,11 @@ class WorkspaceProjectSync:
 
         # 1. Resolve content from memory or disk
         if content is None:
-            disk_path = os.path.join(self.root, file_path) if not os.path.isabs(file_path) else file_path
+            disk_path = self._confine(file_path)
+            if not disk_path:
+                logger.warning("Refusing to sync path outside workspace root: %s", file_path)
+                return None
+
             if os.path.exists(disk_path):
                 try:
                     with open(disk_path, "r", encoding="utf-8", errors="replace") as f:
@@ -298,7 +305,9 @@ class WorkspaceProjectSync:
         Writes content to a file in the workspace directory (self.root), creates parent directories
         if necessary, and syncs/attaches the updated file synchronously with Onyx using blocking upload.
         """
-        target_path = os.path.join(self.root, file_path) if not os.path.isabs(file_path) else file_path
+        target_path = self._confine(file_path)
+        if not target_path:
+            return None
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         with open(target_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -363,6 +372,20 @@ class WorkspaceProjectSync:
             logger.warning("ask_persona tool failed for persona_id=%s: %s", persona_id, exc)
             return f"Error executing persona tool: {exc}"
 
+    def _confine(self, req_path: str) -> Optional[str]:
+        """Resolve a model-supplied path against the workspace root and return
+        the absolute path, or None if it escapes the workspace (path
+        traversal guard). Absolute paths are accepted only when they already
+        point inside the root (the model often echoes absolute paths it saw
+        in the workspace map)."""
+        if not req_path:
+            return None
+        abs_p = os.path.abspath(req_path if os.path.isabs(req_path) else os.path.join(self.root, req_path))
+        root = os.path.abspath(self.root)
+        if abs_p != root and not abs_p.startswith(root + os.sep):
+            return None
+        return abs_p
+
     def execute_local_non_read_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
         """
         Executes a local tool against the workspace disk (e.g. list_dir, grep_search, find_files, write_file).
@@ -378,7 +401,11 @@ class WorkspaceProjectSync:
         # 1. Directory listing (list_dir, ls, dir)
         if t_name in {"list_dir", "ls", "dir"}:
             req_path = args.get("path") or args.get("directory") or args.get("dir_path") or "."
-            target_dir = os.path.join(self.root, req_path) if not os.path.isabs(req_path) else req_path
+            target_dir = self._confine(req_path)
+            if not target_dir:
+                res_output = f"Error: path '{req_path}' is outside the workspace root."
+                get_run_logger().log_tool_call(tool_name=tool_name, arguments=args, result_summary=res_output, intercepted=False)
+                return res_output
             if os.path.exists(target_dir) and os.path.isdir(target_dir):
                 try:
                     entries = sorted(os.listdir(target_dir))
@@ -397,7 +424,11 @@ class WorkspaceProjectSync:
         elif t_name in {"grep_search", "grep", "search_code"}:
             query = args.get("query") or args.get("pattern") or args.get("regex") or ""
             search_path = args.get("path") or "."
-            target_dir = os.path.join(self.root, search_path) if not os.path.isabs(search_path) else search_path
+            target_dir = self._confine(search_path)
+            if not target_dir:
+                res_output = f"Error: path '{search_path}' is outside the workspace root."
+                get_run_logger().log_tool_call(tool_name=tool_name, arguments=args, result_summary=res_output, intercepted=False)
+                return res_output
             matches = []
             if os.path.exists(target_dir):
                 for root_dir, _, files in os.walk(target_dir):
@@ -428,7 +459,11 @@ class WorkspaceProjectSync:
         elif t_name in {"find_files", "glob", "find"}:
             search_pattern = args.get("pattern") or args.get("query") or "*"
             search_path = args.get("path") or "."
-            target_dir = os.path.join(self.root, search_path) if not os.path.isabs(search_path) else search_path
+            target_dir = self._confine(search_path)
+            if not target_dir:
+                res_output = f"Error: path '{search_path}' is outside the workspace root."
+                get_run_logger().log_tool_call(tool_name=tool_name, arguments=args, result_summary=res_output, intercepted=False)
+                return res_output
             matches = []
             if os.path.exists(target_dir):
                 for root_dir, _, files in os.walk(target_dir):
@@ -465,13 +500,17 @@ class WorkspaceProjectSync:
                 return res_output
             if not req_path:
                 res_output = "Error: File path argument missing for write operation."
+            elif not self._confine(req_path):
+                res_output = f"Error: path '{req_path}' is outside the workspace root."
             else:
                 # Check if replace_in_file style string replacement is requested
                 old_str = args.get("old_str") or args.get("search") or args.get("find")
                 new_str = args.get("new_str") or args.get("replace")
                 if old_str is not None and new_str is not None:
-                    target_path = os.path.join(self.root, req_path) if not os.path.isabs(req_path) else req_path
-                    if os.path.exists(target_path):
+                    target_path = self._confine(req_path) or ""
+                    if not target_path:
+                        res_output = f"Error: path '{req_path}' is outside the workspace root."
+                    elif os.path.exists(target_path):
                         try:
                             with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
                                 existing_content = f.read()
@@ -485,7 +524,10 @@ class WorkspaceProjectSync:
                 if not res_output:
                     try:
                         desc = self.write_workspace_file(req_path, content)
-                        res_output = f"Successfully wrote {len(content.encode('utf-8'))} bytes to file '{req_path}' in workspace."
+                        if desc is None:
+                            res_output = f"Failed to write/sync file '{req_path}'."
+                        else:
+                            res_output = f"Successfully wrote {len(content.encode('utf-8'))} bytes to file '{req_path}' in workspace."
                     except Exception as err:
                         res_output = f"Error writing file '{req_path}': {err}"
 

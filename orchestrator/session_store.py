@@ -121,7 +121,8 @@ class ConversationStore:
     def get_active(self, conversation_id: str) -> Optional[Segment]:
         with self._lock:
             segments = self._segments.get(conversation_id, [])
-            return segments[-1] if segments else None
+            active = [s for s in segments if s.status == "ACTIVE"]
+            return active[-1] if active else None
 
     def get_or_create_detector_session(self, conversation_id: str) -> str:
         with self._lock:
@@ -193,10 +194,11 @@ class ConversationStore:
     def close_active(self, conversation_id: str, compaction: str) -> Optional[Segment]:
         with self._lock:
             segments = self._segments.get(conversation_id, [])
-            if not segments:
+            active = [s for s in segments if s.status == "ACTIVE"]
+            if not active:
                 return None
 
-            segment = segments[-1]
+            segment = active[-1]
             segment.compaction = compaction
             segment.status = "CLOSED"
 
@@ -218,8 +220,9 @@ class ConversationStore:
     def append_message(self, conversation_id: str, role: str, content: str) -> None:
         with self._lock:
             segments = self._segments.get(conversation_id, [])
-            if segments:
-                segments[-1].messages.append({"role": role, "content": content})
+            active = [s for s in segments if s.status == "ACTIVE"]
+            if active:
+                active[-1].messages.append({"role": role, "content": content})
 
     def inherited_context(self, conversation_id: str) -> str:
         with self._lock:

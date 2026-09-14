@@ -624,6 +624,8 @@ REMINDER: YOUR OUTPUT MUST BE A SINGLE LINE STARTING WITH 'CONTINUE|' OR 'SWITCH
                                     preamble = buffered_output.split(first_raw, 1)[0].strip()
                                     if preamble:
                                         logger.info("[AUTO-GROUNDING INTERCEPT] Streaming preamble (%d chars) before tool execution.", len(preamble))
+                                        chunks.append(preamble)
+                                        streamed_anything = True
                                         yield preamble
 
                                 logger.info("[AUTO-GROUNDING INTERCEPT] Intercepted batch of %d tool call(s).", len(all_tools))

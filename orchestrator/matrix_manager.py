@@ -99,7 +99,10 @@ class MatrixManager:
     def get_or_build_matrix(self, force_refresh: bool = False) -> Tuple[str, List[int]]:
         if not force_refresh and os.path.exists(self.cache_file):
             logger.info("Loading routing matrix from %s", self.cache_file)
-            with open(self.cache_file, "r", encoding="utf-8") as file:
-                data = json.load(file)
-            return data.get("routing_manifest", ""), data.get("global_tool_ids", [])
+            try:
+                with open(self.cache_file, "r", encoding="utf-8") as file:
+                    data = json.load(file)
+                return data.get("routing_manifest", ""), data.get("global_tool_ids", [])
+            except (json.JSONDecodeError, OSError, AttributeError) as exc:
+                logger.warning("Corrupt routing matrix cache %s (%s); rebuilding.", self.cache_file, exc)
         return self.build_matrix()
