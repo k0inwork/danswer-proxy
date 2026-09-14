@@ -13,6 +13,11 @@ from orchestrator import config
 from orchestrator.config import get_run_logger, logger
 from orchestrator.models import Descriptor, DescriptorStatus
 
+SOURCE_GUIDE_RESOURCE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "resources", "fins_source_guide.md"
+)
+SOURCE_GUIDE_CANONICAL = "SOURCE_fins_guide.txt"
+
 
 class WorkspaceProjectSync:
     IGNORE_DIRS = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.cache', 'dist', 'build', '.idea', '.vscode', 'log', 'logs'}
@@ -197,7 +202,8 @@ class WorkspaceProjectSync:
         Blocks the calling thread until DescriptorStatus is READY or FAILED.
         """
         is_dir_canonical = file_path.startswith("TOP_FOLDER_") or file_path.startswith("FOLDER_")
-        canonical = file_path if is_dir_canonical else self.canonical_name(file_path, is_dir=False)
+        is_source_canonical = file_path.startswith("SOURCE_")
+        canonical = file_path if (is_dir_canonical or is_source_canonical) else self.canonical_name(file_path, is_dir=False)
 
         # 1. Resolve content from memory or disk
         if content is None:
@@ -217,7 +223,9 @@ class WorkspaceProjectSync:
                 logger.warning("File not found on workspace disk for blocking sync: %s", disk_path)
                 return None
 
-        if is_dir_canonical:
+        if is_dir_canonical or is_source_canonical:
+            # Pre-canonical payload (TOP_FOLDER/FOLDER map, SOURCE_* docs):
+            # hash the body as-is; no disk-path/revision header.
             full_payload = content.encode("utf-8") if isinstance(content, str) else content
             content_str = content if isinstance(content, str) else content.decode("utf-8", errors="replace")
             body_str = content_str.split("\n\n", 1)[1] if "\n\n" in content_str else content_str
@@ -676,6 +684,7 @@ class WorkspaceProjectSync:
                     del self.file_hashes[top_folder_cname]
 
             self.update_top_folder()
+            self.ensure_source_guide()
             self.sync_root_files()
             self.start_background_watcher()
         except Exception as exc:
@@ -786,6 +795,46 @@ class WorkspaceProjectSync:
                 lines.append(f" - {prefix}{fname}")
 
         return "\n".join(lines)
+
+    def ensure_source_guide(self, blocking: bool = True) -> Optional[Descriptor]:
+        """Upload the static fins source guide once as SOURCE_fins_guide.txt.
+
+        The guide is a static repo resource: it is independent of the disk
+        workspace, so it is (re-)uploaded only when the guide file itself
+        changes — never when workspace files change."""
+        canonical = SOURCE_GUIDE_CANONICAL
+        try:
+            with open(SOURCE_GUIDE_RESOURCE, encoding="utf-8") as f:
+                content = f.read()
+        except OSError as e:
+            logger.warning("Source guide resource missing (%s): %s", SOURCE_GUIDE_RESOURCE, e)
+            return None
+
+        guide_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        desc = self.descriptors.get(canonical)
+        if (
+            self.file_hashes.get(canonical) == guide_hash
+            and desc
+            and desc.status in {DescriptorStatus.PENDING_UPLOAD, DescriptorStatus.UPLOADED, DescriptorStatus.READY}
+        ):
+            return desc
+
+        header = (
+            f"# FINS SOURCE GUIDE: how to browse fins3:// sources\n"
+            f"# SHA256: {guide_hash[:12]}\n"
+            f"# ====================================================\n\n"
+        )
+        full_payload = (header + content).encode("utf-8")
+        self.file_hashes[canonical] = guide_hash
+        get_run_logger().log_file_read(
+            file_path=SOURCE_GUIDE_RESOURCE,
+            canonical_name=canonical,
+            size_bytes=len(full_payload),
+            source="ensure_source_guide",
+        )
+        if blocking:
+            return self.upload_and_attach_blocking(file_path=canonical, content=(header + content))
+        return self.dispatch_file_sync(canonical, SOURCE_GUIDE_RESOURCE, full_payload)
 
     def update_top_folder(self, blocking: bool = False) -> Optional[Descriptor]:
         tree_text = self.generate_tree_map()
